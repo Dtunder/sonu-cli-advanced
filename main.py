@@ -110,6 +110,41 @@ def main():
                 ui.show_tools()
                 continue
 
+            elif cmd.startswith("/auto"):
+                parts = cmd.split(maxsplit=1)
+                if len(parts) == 1:
+                    ui.show_error("Bitte gib ein Ziel an, z.B. `/auto Mache die CLI so gut wie antigravity`")
+                else:
+                    ziel = parts[1].strip()
+                    ui.show_info(f"🚀 Starte AUTO-LOOP fuer Ziel: [bold yellow]{ziel}[/bold yellow]")
+                    ui.show_info("Druecke Ctrl+C, um den Loop jederzeit abzubrechen.")
+
+                    # Initialer Turn mit dem Ziel
+                    response = client.run_agent_turn(f"NEUES ZIEL: {ziel}. Erstelle einen Plan und beginne sofort mit der Umsetzung. Antworte mit 'ZIEL ERREICHT', wenn alles fertig und validiert ist.", ui)
+                    if response:
+                        ui.display_response(response)
+                        storage.log_interaction(ziel, response)
+
+                    # Automatischer Follow-Up Loop
+                    while True:
+                        if response and "ZIEL ERREICHT" in response:
+                            ui.show_info("[bold green]✅ Agent hat das Ziel als ERREICHT markiert![/bold green]")
+                            break
+
+                        # Kleine Pause für die Lesbarkeit / Kill-Chance
+                        import time
+                        time.sleep(1.5)
+
+                        auto_prompt = "Auto-Loop: Wenn das Ziel erreicht ist, antworte exakt mit 'ZIEL ERREICHT'. Ansonsten analysiere die Ergebnisse der vorherigen Tools, verifiziere deine Änderungen und fuehre den naechsten logischen Schritt aus."
+                        ui.show_info("[dim]... Sende naechsten Auto-Turn ...[/dim]")
+
+                        response = client.run_agent_turn(auto_prompt, ui)
+                        if response:
+                            ui.display_response(response)
+                            storage.log_interaction(auto_prompt, response)
+                continue
+
+
             elif cmd == "/yolo":
                 ui.set_yolo(not ui.yolo)
                 continue

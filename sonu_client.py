@@ -167,6 +167,73 @@ class SonuClient:
             old_history = None
         self.reset_chat(history=old_history)
 
+
+    def _export_history(self):
+        """Exportiert die aktuelle Chat-Historie in ein providerunabhaengiges (OpenAI-like) Format."""
+        history = []
+        if self.provider == "gemini":
+            if not self.chat:
+                return history
+            try:
+                gemini_hist = self.chat.get_history()
+            except Exception:
+                return history
+            for content in gemini_hist:
+                role = "assistant" if content.role == "model" else content.role
+                text_parts = []
+                # Fallback fuer Tool-Calls im Gemini-Verlauf: wir wandeln sie textuell um.
+                for p in content.parts:
+                    if getattr(p, "text", None):
+                        text_parts.append(p.text)
+                    elif getattr(p, "function_call", None):
+                        text_parts.append(f"Tool-Call: {p.function_call.name}")
+                    elif getattr(p, "function_response", None):
+                        text_parts.append(f"Tool-Resultat fuer {p.function_response.name}")
+                if text_parts:
+                    history.append({"role": role, "content": "\n".join(text_parts)})
+        else:
+            if self.provider in self.oa_agents:
+                # oa_agents messages list (skip system prompt)
+                messages = self.oa_agents[self.provider].messages
+                for msg in messages:
+                    if msg.get("role") == "system":
+                        continue
+                    if msg.get("role") in ["user", "assistant"]:
+                        # Fuer einfachen Export Tool-Calls ebenfalls auf Text vereinfachen
+                        content = msg.get("content", "")
+                        if not content and "tool_calls" in msg:
+                            content = "Tool-Calls ausgefuehrt."
+                        history.append({"role": msg.get("role"), "content": content})
+                    elif msg.get("role") == "tool":
+                        history.append({"role": "user", "content": "Tool-Ergebnis: " + str(msg.get("content", ""))})
+        return history
+
+    def _import_history(self, history):
+        """Importiert eine Historie, die via _export_history gewonnen wurde."""
+        if not history:
+            return
+        if self.provider == "gemini":
+            from google.genai import types
+            gemini_history = []
+            for msg in history:
+                role = "model" if msg["role"] == "assistant" else "user"
+                content = msg.get("content", "")
+                gemini_history.append(types.Content(role=role, parts=[types.Part.from_text(text=content)]))
+            self.reset_chat(history=gemini_history)
+        else:
+            if self.provider in self.oa_agents:
+                agent = self.oa_agents[self.provider]
+                # Behalte nur den System-Prompt
+                if agent.messages and agent.messages[0].get("role") == "system":
+                    agent.messages = [agent.messages[0]]
+                else:
+                    agent.messages = []
+                for msg in history:
+                    # tool responses as user messages in flat import
+                    if msg.get("role") not in ["user", "assistant", "system"]:
+                         msg["role"] = "user"
+                    agent.messages.append(msg)
+
     def set_skill(self, name):
         """Aktiviert/deaktiviert ein Skill und baut den Prompt neu auf. Gibt (ok, nachricht)."""
         if name in (None, "", "none", "clear", "off", "aus", "deactivate"):
@@ -315,12 +382,17 @@ class SonuClient:
         active_providers = [self.provider] + self._get_fallback_providers()
         last_error = None
         
+        # Snapshot the history before starting, so we can translate it if we switch providers
+        snapshot_history = self._export_history()
+
         for prov in active_providers:
             if prov != self.provider:
                 ui.show_info(f"Provider '{self.provider}' ausgelastet (Quota). Wechsle automatisch zu: [bold cyan]{prov}[/bold cyan] ...")
                 ok, msg = self.set_provider(prov)
                 if not ok:
                     continue
+                # Import the snapshotted history into the new provider's format
+                self._import_history(snapshot_history)
             
             try:
                 return self._run_agent_turn_internal(user_input, ui, max_steps)
