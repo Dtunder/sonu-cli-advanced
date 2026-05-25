@@ -97,9 +97,9 @@ def spawn_session(prompt: str, api_key: str) -> str:
     payload = json.dumps({
         "prompt": prompt,
         "sourceContext": {
-            "source": "sources/github/Dtunder/nasuta-evo8",
+            "source": "sources/github/Dtunder/sonu-cli-advanced",
             "githubRepoContext": {
-                "startingBranch": "evo9-bugfix-base"
+                "startingBranch": "master"
             }
         },
         "requirePlanApproval": True
