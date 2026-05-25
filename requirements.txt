@@ -1,0 +1,4 @@
+google-genai
+rich
+prompt_toolkit
+python-dotenv
