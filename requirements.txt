@@ -1,4 +1,5 @@
 google-genai
+openai
 rich
 prompt_toolkit
 python-dotenv

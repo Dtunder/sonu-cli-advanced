@@ -86,12 +86,136 @@ def main():
                 )
                 continue
 
+            elif cmd.startswith("/provider"):
+                parts = cmd.split(maxsplit=1)
+                import providers
+                if len(parts) == 1:
+                    ui.show_info(f"Aktiver Provider: [bold cyan]{client.provider}[/bold cyan]")
+                    print("\nVerfügbare Provider:")
+                    for p in providers.list_providers():
+                        prov_info = providers.get_provider(p)
+                        print(f"  • {p} ({prov_info['label']})")
+                    print()
+                else:
+                    new_prov = parts[1].strip()
+                    with ui.show_spinner(f"Wechsle zu Provider '{new_prov}'..."):
+                        ok, msg = client.set_provider(new_prov)
+                        if ok:
+                            ui.show_info(msg)
+                        else:
+                            ui.show_error(msg)
+                continue
+
             elif cmd == "/tools":
                 ui.show_tools()
                 continue
 
             elif cmd == "/yolo":
                 ui.set_yolo(not ui.yolo)
+                continue
+
+            elif cmd == "/skills":
+                skills = client.skills_mgr.list_skills()
+                active = client.skills_mgr.active_skill
+                print("\nVerfügbare Experten-Skills:")
+                for s in skills:
+                    marker = "[bold green](AKTIV)[/bold green]" if s == active else ""
+                    print(f"  • {s} {marker}")
+                print()
+                continue
+                
+            elif cmd.startswith("/activate"):
+                parts = cmd.split(maxsplit=1)
+                if len(parts) == 1:
+                    ui.show_error("Bitte gib den Namen des Skills an, z.B. `/activate cybernetic-thinking`")
+                else:
+                    skill_name = parts[1].strip()
+                    try:
+                        client.skills_mgr.activate_skill(skill_name)
+                        client.reset_chat()
+                        ui.show_info(f"Experten-Skill [bold yellow]{skill_name}[/bold yellow] erfolgreich aktiviert!")
+                    except Exception as e:
+                        ui.show_error(str(e))
+                continue
+                
+            elif cmd == "/deactivate":
+                client.skills_mgr.deactivate_skill()
+                client.reset_chat()
+                ui.show_info("Experten-Skill deaktiviert. Baseline-Prompt wiederhergestellt.")
+                continue
+
+            elif cmd == "/memory":
+                import os as _os
+                mem = client.memory_mgr.load_memory(_os.getcwd())
+                if mem.strip():
+                    print("\n--- Aktives 4-Ebenen-Gedächtnis ---\n")
+                    print(mem)
+                    print("-" * 40 + "\n")
+                else:
+                    ui.show_info("Kein SONU.md-Gedächtnis gefunden.")
+                continue
+
+            elif cmd == "/tasks" or cmd == "/bg":
+                tasks = client.process_mgr.list_tasks()
+                if not tasks:
+                    ui.show_info("Keine aktiven Hintergrundprozesse.")
+                else:
+                    print("\nAktive Hintergrundprozesse:")
+                    for t in tasks:
+                        print(f"  [{t['id']}] {t['command']} - Status: {t['status']} (Laufzeit: {t['elapsed']})")
+                    print()
+                continue
+
+            elif cmd.startswith("/bg output"):
+                parts = cmd.split()
+                if len(parts) < 3:
+                    ui.show_error("Bitte gib die Task-ID an, z.B. `/bg output 1`")
+                else:
+                    try:
+                        tid = int(parts[2].strip())
+                        output = client.process_mgr.read_task_output(tid)
+                        print(f"\n--- Output für Task-ID {tid} ---")
+                        print(output)
+                        print("-" * 30 + "\n")
+                    except ValueError:
+                        ui.show_error("Ungültige Task-ID.")
+                    except Exception as e:
+                        ui.show_error(str(e))
+                continue
+
+            elif cmd.startswith("/bg kill"):
+                parts = cmd.split()
+                if len(parts) < 3:
+                    ui.show_error("Bitte gib die Task-ID an, z.B. `/bg kill 1`")
+                else:
+                    try:
+                        tid = int(parts[2].strip())
+                        client.process_mgr.kill_task(tid)
+                        ui.show_info(f"Task-ID {tid} wurde erfolgreich beendet.")
+                    except ValueError:
+                        ui.show_error("Ungültige Task-ID.")
+                    except Exception as e:
+                        ui.show_error(str(e))
+                continue
+
+            elif cmd.startswith("/delegate"):
+                parts = cmd.split(maxsplit=1)
+                if len(parts) == 1:
+                    ui.show_error("Bitte gib die Aufgabe an, z.B. `/delegate Refactor active_client.py`")
+                else:
+                    import os
+                    prompt_text = parts[1].strip()
+                    with ui.show_spinner("Initialisiere Google Jules im Hintergrund..."):
+                        try:
+                            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jules_delegator.py")
+                            jcmd = f"python \"{script_path}\" \"{prompt_text}\""
+                            tid = client.process_mgr.start_task(jcmd)
+                            ui.show_info(
+                                f"Google Jules erfolgreich im Hintergrund delegiert (Task-ID [bold yellow]{tid}[/bold yellow]).\n"
+                                f"Nutze `/bg output {tid}`, um den Live-Status zu überwachen."
+                            )
+                        except Exception as e:
+                            ui.show_error(f"Fehler bei der Jules-Delegierung: {str(e)}")
                 continue
 
             # Agentischer Turn: das Modell darf selbststaendig Werkzeuge nutzen.

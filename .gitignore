@@ -1,0 +1,27 @@
+# Secrets — NIEMALS committen
+.env
+.env.*
+!.env.example
+*.key
+**/jules_api_key.txt
+Sonu-CLI-Advanced-Clone/
+sonu-cli-clone/
+sonu_log.md
+recherche_log.md
+
+# Lokales/privates Gedaechtnis
+.sonu/
+SONU.local.md
+
+# Laufzeit-Artefakte
+logs/
+*.log
+recherche_log.md
+sonu_log.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/

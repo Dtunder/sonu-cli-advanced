@@ -152,6 +152,115 @@ def run_shell(command: str) -> str:
         return f"FEHLER bei der Ausfuehrung: {e}"
 
 
+_process_manager = None
+
+def set_process_manager(pm):
+    global _process_manager
+    _process_manager = pm
+
+def start_background_task(command: str) -> str:
+    """Startet einen PowerShell-Befehl asynchron im Hintergrund (keine Blockade des CLIs)."""
+    if not _process_manager:
+        return "FEHLER: ProcessManager nicht initialisiert."
+    try:
+        tid = _process_manager.start_task(command)
+        return f"OK: Hintergrundprozess gestartet mit Task-ID {tid}."
+    except Exception as e:
+        return f"FEHLER beim Starten des Hintergrundprozesses: {e}"
+
+def list_background_tasks() -> str:
+    """Listet alle aktiven und kuerzlich beendeten Hintergrund-Tasks auf."""
+    if not _process_manager:
+        return "FEHLER: ProcessManager nicht initialisiert."
+    try:
+        tasks = _process_manager.list_tasks()
+        if not tasks:
+            return "(Keine Hintergrundprozesse aktiv)"
+        lines = []
+        for t in tasks:
+            lines.append(f"Task-ID {t['id']}: '{t['command']}' - Status: {t['status']} (Laufzeit: {t['elapsed']})")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"FEHLER beim Auflisten der Hintergrundprozesse: {e}"
+
+def read_background_task_output(task_id: int, tail_lines: int = 25) -> str:
+    """Liest den kuerzlichen Output (stdout/stderr) eines Hintergrund-Tasks aus."""
+    if not _process_manager:
+        return "FEHLER: ProcessManager nicht initialisiert."
+    try:
+        return _process_manager.read_task_output(task_id, tail_lines)
+    except Exception as e:
+        return f"FEHLER beim Lesen der Task-Ausgabe: {e}"
+
+def kill_background_task(task_id: int) -> str:
+    """Beendet einen aktiven Hintergrundprozess gewaltsam."""
+    if not _process_manager:
+        return "FEHLER: ProcessManager nicht initialisiert."
+    try:
+        _process_manager.kill_task(task_id)
+        return f"OK: Task {task_id} wurde beendet."
+    except Exception as e:
+        return f"FEHLER beim Beenden des Tasks {task_id}: {e}"
+
+def delegate_to_jules(prompt: str) -> str:
+    """Delegiert eine komplexe, repo-weite Coding-Aufgabe headless an Google Jules im Hintergrund."""
+    if not _process_manager:
+        return "FEHLER: ProcessManager nicht initialisiert."
+    try:
+        curr_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(curr_dir, "jules_delegator.py")
+        cmd = f"python \"{script_path}\" \"{prompt}\""
+        tid = _process_manager.start_task(cmd)
+        return f"OK: Google Jules Delegierung im Hintergrund gestartet (Task-ID {tid}). Nutze read_background_task_output, um den Fortschritt zu sehen."
+    except Exception as e:
+        return f"FEHLER beim Starten der Jules-Delegierung: {e}"
+
+def delegate_to_subagent(task_description: str, provider: str = None) -> str:
+    """Delegiert eine isolierte Teilaufgabe an einen autonomen Sub-Agenten (headless)."""
+    try:
+        from sonu_client import SonuClient
+        import terminal_ui
+        import providers
+        
+        # Headless UI mock
+        class HeadlessUI(terminal_ui.TerminalUI):
+            def __init__(self):
+                super().__init__()
+                self.yolo = True # Immer durchlaufen ohne zu fragen
+                self.log = []
+                
+            def show_spinner(self, message="..."):
+                class DummyContext:
+                    def __enter__(self): pass
+                    def __exit__(self, *args): pass
+                return DummyContext()
+                
+            def display_response(self, text): self.log.append(f"Ergebnis: {text}")
+            def display_stream(self, stream): return ""
+            def show_error(self, err): self.log.append(f"Fehler: {err}")
+            def show_info(self, info): self.log.append(f"Info: {info}")
+            def show_agent_thought(self, text): pass
+            def show_tool_call(self, name, args): self.log.append(f"-> Sub-Agent fuehrt '{name}' aus...")
+            def show_tool_result(self, name, result, rejected=False): pass
+            def confirm_action(self, name, args): return True
+
+        ui = HeadlessUI()
+        client = SonuClient()
+        
+        # Override provider if specified
+        if provider and providers.get_provider(provider):
+            client.set_provider(provider)
+            
+        ui.log.append(f"=== Starte autonomen Sub-Agenten (Provider: {client.provider}) ===")
+        
+        final_answer = client.run_agent_turn(f"SUB-AGENT TASK: {task_description}\nErledige dies autonom. Verwende deine Werkzeuge (lies Dateien, suche, etc). Antworte am Ende mit einer ausfuehrlichen, endgueltigen Zusammenfassung deiner Ergebnisse und Analysen.", ui, max_steps=15)
+        
+        summary = "\n".join(ui.log)
+        return f"--- Sub-Agent Execution Log ---\n{summary}\n\n--- Sub-Agent Final Answer ---\n{final_answer}"
+    except Exception as e:
+        return f"FEHLER bei Sub-Agenten-Delegierung: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Registry: name -> dict(func, declaration, safe)
 # 'safe' = read-only, laeuft ohne Bestaetigung.
@@ -239,12 +348,121 @@ REGISTRY = {
             parameters=_schema({"command": _str("Der auszufuehrende PowerShell-Befehl.")}, ["command"]),
         ),
     },
+    "start_background_task": {
+        "func": start_background_task,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="start_background_task",
+            description="Startet einen PowerShell-Befehl asynchron im Hintergrund, ohne die REPL zu blockieren.",
+            parameters=_schema({"command": _str("Der im Hintergrund auszufuehrende PowerShell-Befehl.")}, ["command"]),
+        ),
+    },
+    "list_background_tasks": {
+        "func": list_background_tasks,
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="list_background_tasks",
+            description="Listet alle laufenden und kuerzlich beendeten asynchronen Hintergrundprozesse auf.",
+            parameters=_schema({}, []),
+        ),
+    },
+    "read_background_task_output": {
+        "func": read_background_task_output,
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="read_background_task_output",
+            description="Liest die Ausgaben (stdout/stderr) eines bestimmten Hintergrund-Tasks.",
+            parameters=_schema(
+                {
+                    "task_id": types.Schema(type=types.Type.INTEGER, description="ID des Tasks."),
+                    "tail_lines": types.Schema(type=types.Type.INTEGER, description="Anzahl der Zeilen vom Ende des Logs (Standard: 25)."),
+                },
+                ["task_id"],
+            ),
+        ),
+    },
+    "kill_background_task": {
+        "func": kill_background_task,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="kill_background_task",
+            description="Beendet einen laufenden Hintergrund-Task gewaltsam.",
+            parameters=_schema({"task_id": types.Schema(type=types.Type.INTEGER, description="ID des zu beendenden Tasks.")}, ["task_id"]),
+        ),
+    },
+    "delegate_to_jules": {
+        "func": delegate_to_jules,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="delegate_to_jules",
+            description="Delegiert eine komplexe Programmieraufgabe an Google Jules headless im Hintergrund. Polle danach den Output, um die Fertigstellung zu ueberwachen.",
+            parameters=_schema({"prompt": _str("Detaillierter Prompt der Aufgabe fuer Google Jules.")}, ["prompt"]),
+        ),
+    },
+    "delegate_to_subagent": {
+        "func": delegate_to_subagent,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="delegate_to_subagent",
+            description="Delegiert eine Recherche, Analyse oder Coding-Teilaufgabe an einen isolierten, autonomen Sonu-Subagenten. Verhindert, dass dein eigener Kontext ueberflutet wird. Gib ihm eine SEHR ausfuehrliche Anweisung.",
+            parameters=_schema({
+                "task_description": _str("Detaillierte Anweisung und Ziel fuer den Sub-Agenten."),
+                "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten.")
+            }, ["task_description"]),
+        ),
+    },
 }
 
 
 def get_tool_object() -> types.Tool:
     """Baut das types.Tool mit allen Funktionsdeklarationen fuer die GenerateContentConfig."""
     return types.Tool(function_declarations=[t["declaration"] for t in REGISTRY.values()])
+
+
+def _type_to_str(t) -> str:
+    """google-genai types.Type (Enum oder String) -> JSON-Schema-Typ-String."""
+    if t is None:
+        return "string"
+    name = getattr(t, "name", None) or str(t)
+    return name.split(".")[-1].lower()
+
+
+def _schema_to_json(schema) -> dict:
+    """Konvertiert ein google-genai types.Schema rekursiv in ein OpenAI/JSON-Schema-Dict."""
+    if schema is None:
+        return {"type": "object", "properties": {}}
+    out = {"type": _type_to_str(getattr(schema, "type", None))}
+    desc = getattr(schema, "description", None)
+    if desc:
+        out["description"] = desc
+    props = getattr(schema, "properties", None)
+    if props:
+        out["properties"] = {k: _schema_to_json(v) for k, v in props.items()}
+    required = getattr(schema, "required", None)
+    if required:
+        out["required"] = list(required)
+    items = getattr(schema, "items", None)
+    if items is not None:
+        out["items"] = _schema_to_json(items)
+    if out["type"] == "object" and "properties" not in out:
+        out["properties"] = {}
+    return out
+
+
+def get_openai_tools() -> list:
+    """Baut die Tool-Liste im OpenAI-Function-Calling-Format aus der REGISTRY."""
+    specs = []
+    for entry in REGISTRY.values():
+        decl = entry["declaration"]
+        specs.append({
+            "type": "function",
+            "function": {
+                "name": decl.name,
+                "description": decl.description or "",
+                "parameters": _schema_to_json(getattr(decl, "parameters", None)),
+            },
+        })
+    return specs
 
 
 def is_safe(name: str) -> bool:
