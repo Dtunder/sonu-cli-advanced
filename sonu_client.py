@@ -10,6 +10,7 @@ from process_manager import ProcessManager
 from memory_manager import MemoryManager
 from multi_provider_client import MultiProviderClient
 from openai_agent import OpenAICompatibleAgent
+from storage import StorageManager
 
 SYSTEM_INSTRUCTION = """Du bist Sonu, ein autonomer Coding- und Recherche-Agent, der direkt im Terminal des Nutzers laeuft.
 
@@ -67,6 +68,7 @@ class SonuClient:
         self.skills_mgr = SkillsManager()
         self.process_mgr = ProcessManager()
         self.memory_mgr = MemoryManager()
+        self.storage_mgr = StorageManager()
         tools.set_process_manager(self.process_mgr)
 
         self.client = None
@@ -251,11 +253,32 @@ class SonuClient:
 
     def _send_with_rotation(self, message):
         """Sendet eine Nachricht (str oder Part-Liste) und rotiert bei Quota-Fehlern."""
+        import time
         if not self.chat:
             self.reset_chat()
         for _ in range(len(self.keys)):
             try:
-                return self.chat.send_message(message)
+                start_time = time.time()
+                resp = self.chat.send_message(message)
+                latency = (time.time() - start_time) * 1000
+
+                prompt_tokens = 0
+                completion_tokens = 0
+                if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+                    prompt_tokens = getattr(resp.usage_metadata, "prompt_token_count", 0)
+                    completion_tokens = getattr(resp.usage_metadata, "candidates_token_count", 0)
+
+                if prompt_tokens or completion_tokens:
+                    self.storage_mgr.log_token_usage(
+                        provider=self.provider,
+                        model=self.model_name,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        latency_ms=latency,
+                        estimated_cost_usd=0.0 # TODO: implement cost calculation based on models if needed
+                    )
+
+                return resp
             except Exception as e:
                 if self._is_quota_error(str(e)) and len(self.keys) > 1:
                     if self.rotate_key():

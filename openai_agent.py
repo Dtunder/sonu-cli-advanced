@@ -91,6 +91,7 @@ class OpenAICompatibleAgent:
         return True, f"Skill '{name}' aktiviert."
 
     def run_agent_turn(self, user_input, ui, max_steps=25):
+        import time
         self.messages.append({"role": "user", "content": user_input})
         
         for _ in range(max_steps):
@@ -105,21 +106,25 @@ class OpenAICompatibleAgent:
                 }
                 
                 try:
+                    start_time = time.time()
                     resp = self.client.chat.completions.create(**kwargs)
+                    latency = (time.time() - start_time) * 1000
                 except openai.BadRequestError as e:
                     err_msg = str(e).lower()
                     if "tool call validation failed" in err_msg or "tool_use_failed" in err_msg:
                         ui.show_agent_thought("(Tool-Call Format fehlerhaft, fordere Modell zur Korrektur auf...)")
                         self.messages.append({
                             "role": "user", 
-                            "content": f"System Error: Your last tool call failed validation with: {e}\nPlease correct your tool call format. Do NOT append arguments to the tool name. Output valid JSON arguments."
+                            "content": f"System Error: Your last tool call failed validation with: {e}\n\nPlease correct your tool call format. Do NOT append arguments to the tool name. Output valid JSON arguments."
                         })
                         continue
                     elif "tool" in err_msg or "function" in err_msg:
                         ui.show_agent_thought(f"({self.provider_name} scheint Tool-Calling nicht zu unterstützen, Fallback auf reinen Chat...)")
                         kwargs.pop("tools", None)
                         kwargs.pop("tool_choice", None)
+                        start_time = time.time()
                         resp = self.client.chat.completions.create(**kwargs)
+                        latency = (time.time() - start_time) * 1000
                     else:
                         raise e
             except openai.RateLimitError as e:
@@ -128,6 +133,23 @@ class OpenAICompatibleAgent:
             except Exception as e:
                 # Alle anderen Fehler ebenfalls weiterwerfen, damit Rotation greifen kann
                 raise e
+
+            prompt_tokens = 0
+            completion_tokens = 0
+            if hasattr(resp, "usage") and resp.usage:
+                prompt_tokens = getattr(resp.usage, "prompt_tokens", 0)
+                completion_tokens = getattr(resp.usage, "completion_tokens", 0)
+
+            if prompt_tokens or completion_tokens:
+                if hasattr(self, "sonu_client") and hasattr(self.sonu_client, "storage_mgr"):
+                    self.sonu_client.storage_mgr.log_token_usage(
+                        provider=self.provider_name,
+                        model=self.model,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        latency_ms=latency,
+                        estimated_cost_usd=0.0
+                    )
                 
             msg = resp.choices[0].message
             
