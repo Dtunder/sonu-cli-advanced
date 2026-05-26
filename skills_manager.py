@@ -44,6 +44,13 @@ class SkillsManager:
                     skills.append(name[:-3])
         return skills
 
+    def save_skill(self, name, instruction):
+        """Speichert oder ueberschreibt ein Skill-Profil."""
+        path = os.path.join(self.skills_dir, f"{name}.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"# Skill: {name}\n\n{instruction}\n")
+        return path
+
     def activate_skill(self, name):
         skills = self.list_skills()
         if name not in skills:

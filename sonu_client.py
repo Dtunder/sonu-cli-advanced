@@ -201,17 +201,17 @@ class SonuClient:
     @staticmethod
     def _is_quota_error(error_str: str) -> bool:
         s = error_str.lower()
-        # Bewusst eng gefasst: nur echte Quota-/Key-Probleme loesen Rotation aus.
-        # 'invalid argument' o.ae. (z.B. falscher Modellname) wird NICHT als Quota gewertet.
-        return (
-            "quota" in s
-            or "rate limit" in s
-            or "resource_exhausted" in s
-            or "429" in s
-            or "api key expired" in s
-            or "api_key_invalid" in s
-            or "permission_denied" in s
-        )
+        return any(k in s for k in [
+            "quota", "rate limit", "resource_exhausted", "429",
+            "api key expired", "api_key_invalid", "permission_denied",
+            "api key not valid", "403", "forbidden", "limit reached",
+            "insufficient permissions"
+        ])
+
+    @staticmethod
+    def _is_server_error(error_str: str) -> bool:
+        s = error_str.lower()
+        return any(k in s for k in ["503", "high demand", "unavailable", "server error", "500", "502", "504"])
 
     def rotate_key(self):
         """Rotiert zum naechsten Key im Pool, erhaelt den Gespraechsverlauf und aktualisiert .env."""
@@ -230,12 +230,6 @@ class SonuClient:
         self.active_index = (self.active_index + 1) % len(self.keys)
         new_key = self.keys[self.active_index]
         self.api_key = new_key
-
-        from rich.console import Console
-        Console().print(
-            f"\n[bold yellow][!] Quota erschoepft oder Key ungueltig. Rotiere zu Key-Index "
-            f"{self.active_index + 1} (...{new_key[-6:]}) und wiederhole Anfrage...[/bold yellow]\n"
-        )
 
         self.client = genai.Client(api_key=new_key)
         self._update_env_file(new_key)
@@ -259,73 +253,93 @@ class SonuClient:
             pass
 
     def _send_with_rotation(self, message):
-        """Sendet eine Nachricht (str oder Part-Liste) und rotiert bei Quota-Fehlern."""
-        import time
+        """Sendet eine Nachricht mit exponential Backoff und Key-Rotation."""
         if not self.chat:
             self.reset_chat()
-        for _ in range(len(self.keys)):
+            
+        backoff_schedule = [2, 4, 8]
+        
+        for attempt in range(len(backoff_schedule) + 1):
             try:
-                start_time = time.time()
-                resp = self.chat.send_message(message)
-                latency = (time.time() - start_time) * 1000
+                # Versuche alle Keys im Pool
+                for _ in range(max(1, len(self.keys))):
+                    try:
+                        start_time = time.time()
+                        resp = self.chat.send_message(message)
+                        latency = (time.time() - start_time) * 1000
 
-                prompt_tokens = 0
-                completion_tokens = 0
-                if hasattr(resp, "usage_metadata") and resp.usage_metadata:
-                    prompt_tokens = getattr(resp.usage_metadata, "prompt_token_count", 0)
-                    completion_tokens = getattr(resp.usage_metadata, "candidates_token_count", 0)
-                
-                if prompt_tokens or completion_tokens:
-                    self.storage_mgr.log_token_usage(
-                        provider=self.provider,
-                        model=self.model_name,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        latency_ms=latency,
-                        estimated_cost_usd=0.0 # TODO: implement cost calculation based on models if needed
-                    )
+                        prompt_tokens = 0
+                        completion_tokens = 0
+                        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+                            prompt_tokens = getattr(resp.usage_metadata, "prompt_token_count", 0)
+                            completion_tokens = getattr(resp.usage_metadata, "candidates_token_count", 0)
+                        
+                        if prompt_tokens or completion_tokens:
+                            self.storage_mgr.log_token_usage(
+                                provider=self.provider,
+                                model=self.model_name,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                latency_ms=latency,
+                                estimated_cost_usd=0.0
+                            )
 
-                return resp
+                        return resp
+                    except Exception as e:
+                        err_str = str(e)
+                        if self._is_quota_error(err_str) and len(self.keys) > 1:
+                            if self.rotate_key():
+                                continue
+                        raise
             except Exception as e:
-                if self._is_quota_error(str(e)) and len(self.keys) > 1:
-                    if self.rotate_key():
-                        continue
-                raise
-        raise Exception("Alle verfuegbaren API-Keys im Pool sind erschoepft oder gesperrt!")
+                err_str = str(e)
+                if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):
+                    time.sleep(backoff_schedule[attempt])
+                    continue
+                raise e
+        
+        return None # Sollte nie erreicht werden wegen raise e
 
     def send_message_stream(self, message):
-        """Sendet eine Nachricht als Stream und rotiert bei Quota-Fehlern.
-        Da der Stream lazy ist, erzwingen wir das Abrufen des ersten Chunks,
-        um Quota-Fehler sofort abzufangen und den Key zu rotieren.
-        """
+        """Sendet eine Nachricht als Stream mit Backoff und Key-Rotation."""
         if not self.chat:
             self.reset_chat()
-        for _ in range(len(self.keys)):
+
+        backoff_schedule = [2, 4, 8]
+        
+        for attempt in range(len(backoff_schedule) + 1):
             try:
-                response_stream = self.chat.send_message_stream(message)
-                iterator = iter(response_stream)
-                
-                # Erste Antwort abfragen, um Netzwerkverbindung/Quota sofort zu testen
-                first_chunk = next(iterator)
-                
-                # Generator zurueckgeben, der den ersten Chunk und danach den Rest liefert
-                def stream_generator():
-                    yield first_chunk
-                    for chunk in iterator:
-                        yield chunk
-                return stream_generator()
-            except StopIteration:
-                # Leerer Stream
-                def empty_generator():
-                    return
-                    yield
-                return empty_generator()
+                for _ in range(max(1, len(self.keys))):
+                    try:
+                        response_stream = self.chat.send_message_stream(message)
+                        iterator = iter(response_stream)
+                        
+                        # Erste Antwort abfragen, um Quota sofort zu testen
+                        first_chunk = next(iterator)
+                        
+                        def stream_generator():
+                            yield first_chunk
+                            for chunk in iterator:
+                                yield chunk
+                        return stream_generator()
+                    except StopIteration:
+                        def empty_generator():
+                            yield from []
+                        return empty_generator()
+                    except Exception as e:
+                        err_str = str(e)
+                        if self._is_quota_error(err_str) and len(self.keys) > 1:
+                            if self.rotate_key():
+                                continue
+                        raise
             except Exception as e:
-                if self._is_quota_error(str(e)) and len(self.keys) > 1:
-                    if self.rotate_key():
-                        continue
-                raise
-        raise Exception("Alle verfuegbaren API-Keys im Pool sind erschoepft!")
+                err_str = str(e)
+                if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):
+                    time.sleep(backoff_schedule[attempt])
+                    continue
+                raise e
+        
+        return None
 
     def _get_fallback_providers(self):
         """Findet alle Provider, fuer die ein API-Key in der .env existiert, ausser dem aktuellen."""
@@ -352,59 +366,44 @@ class SonuClient:
     def run_agent_turn(self, user_input, ui, max_steps=25):
         """Wrapper fuer den Agent-Loop mit kaskadierendem automatischem Provider-Fallback.
         Versucht alle verfuegbaren Provider nacheinander, bis einer erfolgreich antwortet.
-        Fallbacks erfolgen auch bei Offline-Status oder Connection-Errors.
         """
         is_online = self._check_internet_connection()
         if not is_online and "ollama" in providers.list_providers() and self.provider != "ollama":
-            ui.show_info("[bold red]Keine Internetverbindung erkannt. Wechsle automatisch zu lokalem Offline-Provider: ollama[/bold red]")
             self.set_provider("ollama")
 
         active_providers = [self.provider] + self._get_fallback_providers()
-        # Stellen wir sicher, dass Ollama am Ende ist, falls wir es nicht als aktiven Provider haben
         if "ollama" in active_providers and active_providers[0] != "ollama":
             active_providers.remove("ollama")
             active_providers.append("ollama")
             
         last_error = None
-        has_connection_error = False
+        backoff_schedule = [2, 4, 8]
         
         for prov in active_providers:
             if prov != self.provider:
-                reason = "ausgelastet/offline"
-                if has_connection_error:
-                    reason = "Verbindungsfehler"
-                ui.show_info(f"Provider '{self.provider}' {reason}. Wechsle automatisch zu: [bold cyan]{prov}[/bold cyan] ...")
                 ok, msg = self.set_provider(prov)
                 if not ok:
                     continue
             
-            try:
-                return self._run_agent_turn_internal(user_input, ui, max_steps)
-            except Exception as e:
-                err_str = str(e).lower()
-                is_quota = any(k in err_str for k in [
-                    "erschoepft", "quota", "rate limit", "429", "limit reached", 
-                    "exhausted", "forbidden", "invalid argument", "model not found", 
-                    "insufficient permissions", "error code: 400", "error code: 403"
-                ])
-                is_connection = any(k in err_str for k in [
-                    "connection error", "timeout", "network is unreachable", 
-                    "name resolution failed", "failed to connect", "socket"
-                ])
-                
-                if is_connection:
-                    has_connection_error = True
+            for attempt in range(len(backoff_schedule) + 1):
+                try:
+                    return self._run_agent_turn_internal(user_input, ui, max_steps)
+                except Exception as e:
+                    err_str = str(e).lower()
+                    is_retryable = (
+                        self._is_quota_error(err_str) or 
+                        self._is_server_error(err_str) or 
+                        any(k in err_str for k in ["connection", "timeout", "network", "socket"])
+                    )
                     
-                if is_quota or is_connection:
+                    if is_retryable and attempt < len(backoff_schedule):
+                        time.sleep(backoff_schedule[attempt])
+                        continue
+                        
                     last_error = e
-                    continue
-                else:
-                    raise
+                    break # Zum naechsten Provider wechseln
                     
-        raise Exception(
-            f"Alle konfigurierten Provider "
-            f"sind erschoepft, gesperrt oder nicht erreichbar!\nLetzter Fehler: {last_error}"
-        )
+        raise Exception(f"Alle konfigurierten Provider sind fehlgeschlagen! Letzter Fehler: {last_error}")
 
     def _run_agent_turn_internal(self, user_input, ui, max_steps=25):
         """Agentischer Loop: sendet die Eingabe, fuehrt angeforderte Tools aus und

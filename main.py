@@ -14,21 +14,40 @@ from terminal_ui import TerminalUI
 
 def main():
     ui = TerminalUI()
-    ui.show_welcome()
+    # Headless Task-Mode via Startargument: --task "aufgabe" (oder -t "aufgabe")
+    task_description = None
+    for i, arg in enumerate(sys.argv):
+        if arg in ("--task", "-t") and i + 1 < len(sys.argv):
+            task_description = sys.argv[i + 1]
+            break
+
+    if not task_description:
+        ui.show_welcome()
 
     # YOLO-Mode via Startargument: .\sonu.bat --yolo  (oder -y)
-    if any(arg in ("--yolo", "-y") for arg in sys.argv[1:]):
+    if task_description or any(arg in ("--yolo", "-y") for arg in sys.argv[1:]):
         ui.set_yolo(True)
 
     try:
         # Standardmodell
-        client = SonuClient(model_name="gemini-2.5-flash")
-        ui.show_info(f"Sonu Client erfolgreich geladen. Aktives Modell: [bold cyan]{client.model_name}[/bold cyan]")
+        client = SonuClient()
+        if not task_description:
+            ui.show_info(f"Sonu Client erfolgreich geladen. Aktives Modell: [bold cyan]{client.model_name}[/bold cyan]")
     except Exception as e:
         ui.show_error(f"Fehler bei der Initialisierung: {str(e)}")
         sys.exit(1)
 
     storage = StorageManager()
+
+    if task_description:
+        try:
+            response = client.run_agent_turn(task_description, ui)
+            print(f"\n--- Autonomes Endergebnis ---")
+            print(response)
+            sys.exit(0)
+        except Exception as e:
+            ui.show_error(f"Fehler bei der autonomen Ausführung: {str(e)}")
+            sys.exit(1)
 
     while True:
         try:
@@ -233,6 +252,52 @@ def main():
                             )
                         except Exception as e:
                             ui.show_error(f"Fehler bei der Jules-Delegierung: {str(e)}")
+                continue
+
+            elif cmd.startswith("/distill"):
+                parts = cmd.split(maxsplit=1)
+                if len(parts) == 1:
+                    ui.show_error("Bitte gib einen Namen fuer das Skill an, z.B. `/distill react-debugger`")
+                else:
+                    skill_name = parts[1].strip()
+                    with ui.show_spinner(f"Distilliere Workflow in Skill '{skill_name}'..."):
+                        try:
+                            # Lese die letzten ~10.000 Zeichen aus dem Log
+                            log_path = storage.get_log_path()
+                            log_content = ""
+                            if __import__("os").path.exists(log_path):
+                                with open(log_path, "r", encoding="utf-8") as f:
+                                    f.seek(max(0, __import__("os").path.getsize(log_path) - 10000))
+                                    log_content = f.read()
+
+                            distill_prompt = (
+                                "Analysiere die folgenden letzten Interaktionen aus dem Log. "
+                                "Extrahiere die logischen Denkschritte, eingesetzten Tools und erfolgreichen Muster in ein praezises, "
+                                "wiederverwendbares Experten-Skill-Profil (Markdown-Format, imperatives Deutsch, Fokus auf Best Practices). "
+                                "Antworte NUR mit den reinen Instruktionen fuer das Skill-Profil, kein Vorgeplaenkel.\n\n"
+                                f"LOGS:\n{log_content}"
+                            )
+                            
+                            # Wir nutzen den aktiven Provider statenlos
+                            if client.provider == "gemini":
+                                resp = client.client.models.generate_content(
+                                    model=client.model_name,
+                                    contents=distill_prompt
+                                )
+                                skill_instruction = resp.text
+                            else:
+                                oa_agent = client.oa_agents[client.provider]
+                                resp = oa_agent.client.chat.completions.create(
+                                    model=oa_agent.model,
+                                    messages=[{"role": "user", "content": distill_prompt}]
+                                )
+                                skill_instruction = resp.choices[0].message.content
+
+                            # Skill speichern
+                            path = client.skills_mgr.save_skill(skill_name, skill_instruction)
+                            ui.show_info(f"Skill erfolgreich destilliert und unter [cyan]{path}[/cyan] gespeichert!\nDu kannst es jetzt mit `/activate {skill_name}` nutzen.")
+                        except Exception as e:
+                            ui.show_error(f"Fehler bei der Skill-Distillation: {str(e)}")
                 continue
 
             # Agentischer Turn: das Modell darf selbststaendig Werkzeuge nutzen.

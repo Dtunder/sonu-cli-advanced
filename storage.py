@@ -4,9 +4,10 @@ import sqlite3
 import time
 
 class StorageManager:
-    def __init__(self, filename="sonu_log.md", db_filename="sonu.db"):
-        self.filename = filename
-        self.db_filename = db_filename
+    def __init__(self, filename=None, db_filename=None):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.filename = filename if filename else os.path.join(base_dir, "sonu_log.md")
+        self.db_filename = db_filename if db_filename else os.path.join(base_dir, "sonu.db")
         self.interaction_count = 0
         self._count_existing_interactions()
         self._init_db()

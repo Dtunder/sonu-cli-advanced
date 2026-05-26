@@ -13,7 +13,7 @@ PROVIDERS = {
         "kind": "gemini",
         "env_var": "GEMINI_API_KEY",
         "base_url": None,
-        "default_model": "gemini-2.5-flash",
+        "default_model": "gemini-3.5-flash",
     },
     "groq": {
         "label": "Groq",
