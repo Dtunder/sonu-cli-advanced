@@ -508,6 +508,17 @@ REGISTRY = {
             }, ["task_description"]),
         ),
     },
+    "invoke_swarm_consensus": {
+        "func": lambda prompt: __import__('debate_engine').invoke_swarm(prompt),
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="invoke_swarm_consensus",
+            description="Invokes the SwarmConsensusEngine, which spins up multiple parallel AI agents (using different providers like Gemini, Groq, OpenRouter) to debate and synthesize the ultimate top-level answer to a complex prompt.",
+            parameters=_schema({
+                "prompt": _str("The complex question or task for the parallel swarm to answer.")
+            }, ["prompt"]),
+        ),
+    },
 }
 
 

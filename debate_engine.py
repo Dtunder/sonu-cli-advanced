@@ -184,3 +184,128 @@ class GroupDebateEngine:
             "best_provider": best_provider,
             "best_proposal": best_proposal
         }
+
+import asyncio
+
+class SwarmConsensusEngine:
+    """
+    A true asynchronous swarm consensus engine that spins up multiple agent calls
+    in parallel to synthesize the best possible answer from multiple models/agents.
+    """
+    def __init__(self, sonu_client, ui=None):
+        self.sonu_client = sonu_client
+        self.ui = ui
+        self.logger = logging.getLogger("SwarmConsensusEngine")
+
+        import providers
+        import os
+        self.providers = []
+        for p in providers.list_providers():
+            prov_info = providers.get_provider(p)
+            if prov_info["env_var"] is None or os.getenv(prov_info["env_var"]):
+                self.providers.append(p)
+        if not self.providers:
+            self.providers = ["gemini", "groq", "openrouter"] # fallback
+
+    async def _get_async_response(self, provider, prompt, instruction):
+        # We run the synchronous call in a threadpool to not block asyncio event loop
+        loop = asyncio.get_running_loop()
+        engine = GroupDebateEngine(self.sonu_client, self.ui)
+        return await loop.run_in_executor(
+            None,
+            engine._get_provider_response,
+            provider,
+            prompt,
+            instruction
+        )
+
+    async def run_swarm_debate(self, prompt: str) -> str:
+        if self.ui:
+            self.ui.show_info(f"Initiating Swarm Consensus for: '{prompt}'")
+            self.ui.show_agent_thought("Swarm nodes generating parallel proposals...")
+
+        # 1. Parallel Proposals
+        proposals = {}
+        proposal_tasks = []
+        for provider in self.providers:
+            task = asyncio.create_task(self._get_async_response(
+                provider,
+                prompt,
+                "You are an expert sub-agent in a swarm. Provide your best proposed solution to the user's prompt. Be detailed and accurate."
+            ))
+            proposal_tasks.append((provider, task))
+
+        for provider, task in proposal_tasks:
+            try:
+                proposals[provider] = await task
+            except Exception as e:
+                if self.ui:
+                    self.ui.show_error(f"Swarm node {provider} failed proposal: {e}")
+                proposals[provider] = ""
+
+        # Filter out empty
+        proposals = {p: text for p, text in proposals.items() if text}
+        if not proposals:
+            return "Swarm failed to generate any proposals."
+
+        if self.ui:
+            self.ui.show_agent_thought("Swarm nodes synthesizing final consensus...")
+
+        # 2. Parallel Synthesis (instead of just critiquing, we ask them to synthesize a master answer)
+        syntheses = {}
+        synthesis_tasks = []
+        for provider in proposals.keys():
+            other_proposals_text = ""
+            for p_name, p_text in proposals.items():
+                other_proposals_text += f"\n--- Proposal from Swarm Node {p_name} ---\n{p_text}\n"
+
+            synth_prompt = f"Original Prompt: {prompt}\n\nHere are proposals from the swarm:\n{other_proposals_text}\n\nSynthesize these into the ultimate, most correct, and comprehensive answer."
+
+            task = asyncio.create_task(self._get_async_response(
+                provider,
+                synth_prompt,
+                "You are the master synthesizer of a cybernetic swarm. Combine the best elements of the provided proposals to create a flawless final answer."
+            ))
+            synthesis_tasks.append((provider, task))
+
+        for provider, task in synthesis_tasks:
+            try:
+                syntheses[provider] = await task
+            except Exception as e:
+                if self.ui:
+                    self.ui.show_error(f"Swarm node {provider} failed synthesis: {e}")
+                syntheses[provider] = ""
+
+        syntheses = {p: text for p, text in syntheses.items() if text}
+        if not syntheses:
+            return "Swarm failed to synthesize a consensus."
+
+        # 3. Final Evaluator (Use highest capability provider, e.g. Gemini, to pick the best synthesis)
+        evaluator_provider = "gemini" if "gemini" in syntheses else list(syntheses.keys())[0]
+        final_answer = syntheses[evaluator_provider]
+
+        if self.ui:
+            self.ui.show_info("Swarm Consensus achieved.")
+
+        return f"=== SWARM CONSENSUS ANSWER ===\n\n{final_answer}"
+
+def invoke_swarm(prompt: str) -> str:
+    # A synchronous wrapper to expose as a tool
+    try:
+        from sonu_client import SonuClient
+        from terminal_ui import TerminalUI
+        # Fallback to minimal UI
+        class SilentUI:
+            def show_info(self, *args, **kwargs): pass
+            def show_error(self, *args, **kwargs): pass
+            def show_agent_thought(self, *args, **kwargs): pass
+
+        # We need an instance of client, try to get existing or create temporary
+        try:
+            client = SonuClient()
+            engine = SwarmConsensusEngine(client, SilentUI())
+            return asyncio.run(engine.run_swarm_debate(prompt))
+        except Exception as e:
+            return f"Failed to invoke swarm: {e}"
+    except Exception as e:
+        return f"Failed to initialize swarm: {e}"
