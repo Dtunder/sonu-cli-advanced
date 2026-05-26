@@ -321,6 +321,17 @@ def main():
             break
         except Exception as e:
             ui.show_error(f"Ein Fehler ist aufgetreten: {str(e)}")
+            ui.show_info("[bold magenta]🧠 Analysiere Crash und repariere mich selbst...[/bold magenta]")
+            try:
+                error_msg = (
+                    f"Du bist in deiner REPL abgestürzt. Der Fehler lautet: {str(e)}\n"
+                    f"Finde den Fehler im Code und repariere ihn mit `edit_file` oder `write_file`. "
+                    f"Keine Erklärungen, nur der chirurgische Fix."
+                )
+                client.run_agent_turn(error_msg, ui, max_steps=10)
+                ui.show_info("[bold green]✓ Selbstreparatur abgeschlossen. Ich bin wieder einsatzbereit![/bold green]")
+            except Exception as repair_e:
+                ui.show_error(f"Selbstreparatur fehlgeschlagen: {str(repair_e)}")
 
 if __name__ == "__main__":
     main()
