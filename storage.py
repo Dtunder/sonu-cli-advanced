@@ -75,3 +75,26 @@ class StorageManager:
             conn.close()
         except Exception as e:
             print(f"Fehler beim Loggen des Token-Verbrauchs: {e}")
+
+    def get_token_usage_stats(self):
+        """Returns aggregated token usage statistics by provider."""
+        stats = {}
+        try:
+            conn = sqlite3.connect(self.db_filename)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT provider, SUM(prompt_tokens), SUM(completion_tokens), SUM(estimated_cost_usd)
+                FROM token_logs
+                GROUP BY provider
+            ''')
+            rows = cursor.fetchall()
+            for row in rows:
+                stats[row[0]] = {
+                    "prompt_tokens": row[1],
+                    "completion_tokens": row[2],
+                    "cost": row[3]
+                }
+            conn.close()
+        except Exception as e:
+            print(f"Fehler beim Abrufen der Quota-Statistiken: {e}")
+        return stats

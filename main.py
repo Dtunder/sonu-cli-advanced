@@ -110,10 +110,14 @@ def main():
                 import providers
                 if len(parts) == 1:
                     ui.show_info(f"Aktiver Provider: [bold cyan]{client.provider}[/bold cyan]")
-                    print("\nVerfügbare Provider:")
+                    print("\nVerfügbare Provider & Verwendete Tokens/Quota:")
+                    stats = storage.get_token_usage_stats()
                     for p in providers.list_providers():
                         prov_info = providers.get_provider(p)
-                        print(f"  • {p} ({prov_info['label']})")
+                        p_stats = stats.get(p, {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0})
+                        total = p_stats["prompt_tokens"] + p_stats["completion_tokens"]
+                        cost_str = f"| Kosten: ${p_stats['cost']:.4f}" if p_stats['cost'] > 0 else ""
+                        print(f"  • {p:<15} ({prov_info['label']:<20}) | Tokens: {total:<8} {cost_str}")
                     print()
                 else:
                     new_prov = parts[1].strip()
