@@ -80,6 +80,23 @@ def test_process_manager():
     print("[SUCCESS] ProcessManager erfolgreich getestet!\n")
 
 
+if __name__ == "__main__":
+    print("=== STARTE AUTOMATISIERTE VALIDIERUNG DER ADVANCED-ARCHITEKTUR ===\n")
+    try:
+        test_memory_manager()
+        test_skills_manager()
+        test_process_manager()
+        test_debate_engine()
+        test_debate_engine()
+        print("=== ALLE TESTS ERFOLGREICH BESTANDEN! ===")
+        sys.exit(0)
+    except AssertionError as e:
+        print(f"[FAIL] Zusicherung fehlgeschlagen: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"[ERROR] Unerwarteter Fehler: {e}")
+        sys.exit(1)
+
 def test_debate_engine():
     print("[TEST] Teste GroupDebateEngine...")
     from unittest.mock import MagicMock, patch
@@ -108,19 +125,30 @@ def test_debate_engine():
 
         print("[SUCCESS] GroupDebateEngine erfolgreich getestet!\n")
 
+def test_debate_engine():
+    print("[TEST] Teste GroupDebateEngine...")
+    from unittest.mock import MagicMock, patch
+    from debate_engine import GroupDebateEngine
 
-if __name__ == "__main__":
-    print("=== STARTE AUTOMATISIERTE VALIDIERUNG DER ADVANCED-ARCHITEKTUR ===\n")
-    try:
-        test_memory_manager()
-        test_skills_manager()
-        test_process_manager()
-        test_debate_engine()
-        print("=== ALLE TESTS ERFOLGREICH BESTANDEN! ===")
-        sys.exit(0)
-    except AssertionError as e:
-        print(f"[FAIL] Zusicherung fehlgeschlagen: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[ERROR] Unerwarteter Fehler: {e}")
-        sys.exit(1)
+    with patch('debate_engine.GroupDebateEngine._get_provider_response') as mock_get:
+        # Setup mock responses
+        def side_effect(provider, prompt, role_instruction):
+            if "proposed solution" in role_instruction:
+                return f"Proposal from {provider}"
+            else:
+                # critique
+                return f"gemini Score: 8/10\ngroq Score: 9/10\nopenrouter Score: 7/10\nThis is critique from {provider}."
+
+        mock_get.side_effect = side_effect
+
+        ui_mock = MagicMock()
+        client_mock = MagicMock()
+
+        engine = GroupDebateEngine(client_mock, ui_mock)
+        result = engine.run_debate("How to reverse a string?")
+
+        assert "proposals" in result, "Proposals missing!"
+        assert len(result["proposals"]) == 3, "Should have 3 proposals"
+        assert result["best_provider"] == "groq", "Groq should be best"
+
+        print("[SUCCESS] GroupDebateEngine erfolgreich getestet!\n")
