@@ -10,6 +10,9 @@ from process_manager import ProcessManager
 from memory_manager import MemoryManager
 from multi_provider_client import MultiProviderClient
 from openai_agent import OpenAICompatibleAgent
+from storage import StorageManager
+from context_compressor import compress_gemini_history
+
 
 SYSTEM_INSTRUCTION = """Du bist Sonu, ein autonomer Coding- und Recherche-Agent, der direkt im Terminal des Nutzers laeuft.
 
@@ -67,6 +70,7 @@ class SonuClient:
         self.skills_mgr = SkillsManager()
         self.process_mgr = ProcessManager()
         self.memory_mgr = MemoryManager()
+        self.storage_mgr = StorageManager()
         tools.set_process_manager(self.process_mgr)
 
         self.client = None
@@ -89,7 +93,7 @@ class SonuClient:
             return False, f"Unbekannter Provider: {name}"
             
         env_var = prov_info["env_var"]
-        if not os.getenv(env_var):
+        if env_var is not None and not os.getenv(env_var):
             return False, f"Kein API Key gefunden fuer {name}. Setze {env_var} in .env"
             
         self.provider = name
@@ -251,11 +255,32 @@ class SonuClient:
 
     def _send_with_rotation(self, message):
         """Sendet eine Nachricht (str oder Part-Liste) und rotiert bei Quota-Fehlern."""
+        import time
         if not self.chat:
             self.reset_chat()
         for _ in range(len(self.keys)):
             try:
-                return self.chat.send_message(message)
+                start_time = time.time()
+                resp = self.chat.send_message(message)
+                latency = (time.time() - start_time) * 1000
+
+                prompt_tokens = 0
+                completion_tokens = 0
+                if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+                    prompt_tokens = getattr(resp.usage_metadata, "prompt_token_count", 0)
+                    completion_tokens = getattr(resp.usage_metadata, "candidates_token_count", 0)
+                
+                if prompt_tokens or completion_tokens:
+                    self.storage_mgr.log_token_usage(
+                        provider=self.provider,
+                        model=self.model_name,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        latency_ms=latency,
+                        estimated_cost_usd=0.0 # TODO: implement cost calculation based on models if needed
+                    )
+
+                return resp
             except Exception as e:
                 if self._is_quota_error(str(e)) and len(self.keys) > 1:
                     if self.rotate_key():
@@ -304,20 +329,46 @@ class SonuClient:
             if p == self.provider: 
                 continue
             prov_info = providers.get_provider(p)
-            if os.getenv(prov_info["env_var"]):
+            # Offline-Provider haben keinen env_var, online muessen einen Key haben.
+            if prov_info["env_var"] is None or os.getenv(prov_info["env_var"]):
                 available.append(p)
         return available
+
+    def _check_internet_connection(self):
+        import socket
+        try:
+            # Versuche, eine Verbindung zu einem zuverlaessigen Server herzustellen
+            socket.create_connection(("1.1.1.1", 53), timeout=2)
+            return True
+        except OSError:
+            pass
+        return False
 
     def run_agent_turn(self, user_input, ui, max_steps=25):
         """Wrapper fuer den Agent-Loop mit kaskadierendem automatischem Provider-Fallback.
         Versucht alle verfuegbaren Provider nacheinander, bis einer erfolgreich antwortet.
+        Fallbacks erfolgen auch bei Offline-Status oder Connection-Errors.
         """
+        is_online = self._check_internet_connection()
+        if not is_online and "ollama" in providers.list_providers() and self.provider != "ollama":
+            ui.show_info("[bold red]Keine Internetverbindung erkannt. Wechsle automatisch zu lokalem Offline-Provider: ollama[/bold red]")
+            self.set_provider("ollama")
+
         active_providers = [self.provider] + self._get_fallback_providers()
+        # Stellen wir sicher, dass Ollama am Ende ist, falls wir es nicht als aktiven Provider haben
+        if "ollama" in active_providers and active_providers[0] != "ollama":
+            active_providers.remove("ollama")
+            active_providers.append("ollama")
+            
         last_error = None
+        has_connection_error = False
         
         for prov in active_providers:
             if prov != self.provider:
-                ui.show_info(f"Provider '{self.provider}' ausgelastet (Quota). Wechsle automatisch zu: [bold cyan]{prov}[/bold cyan] ...")
+                reason = "ausgelastet/offline"
+                if has_connection_error:
+                    reason = "Verbindungsfehler"
+                ui.show_info(f"Provider '{self.provider}' {reason}. Wechsle automatisch zu: [bold cyan]{prov}[/bold cyan] ...")
                 ok, msg = self.set_provider(prov)
                 if not ok:
                     continue
@@ -331,15 +382,23 @@ class SonuClient:
                     "exhausted", "forbidden", "invalid argument", "model not found", 
                     "insufficient permissions", "error code: 400", "error code: 403"
                 ])
-                if is_quota:
+                is_connection = any(k in err_str for k in [
+                    "connection error", "timeout", "network is unreachable", 
+                    "name resolution failed", "failed to connect", "socket"
+                ])
+                
+                if is_connection:
+                    has_connection_error = True
+                    
+                if is_quota or is_connection:
                     last_error = e
                     continue
                 else:
                     raise
                     
         raise Exception(
-            f"Alle konfigurierten Provider (Gemini, Groq, OpenRouter, xAI, Hugging Face) "
-            f"sind erschoepft oder gesperrt!\nLetzter Fehler: {last_error}"
+            f"Alle konfigurierten Provider "
+            f"sind erschoepft, gesperrt oder nicht erreichbar!\nLetzter Fehler: {last_error}"
         )
 
     def _run_agent_turn_internal(self, user_input, ui, max_steps=25):
@@ -348,6 +407,12 @@ class SonuClient:
         """
         if self.provider != "gemini":
             return self.oa_agents[self.provider].run_agent_turn(user_input, ui, max_steps)
+
+        if self.chat:
+            old_history = self.chat.get_history()
+            new_history = compress_gemini_history(old_history, self.model_name, self.client)
+            if len(new_history) != len(old_history):
+                self.reset_chat(history=new_history)
 
         resp = self._send_with_rotation(user_input)
 

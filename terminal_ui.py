@@ -202,6 +202,7 @@ class TerminalUI:
         table.add_row("/bg output <id>", "Zeigt den aktuellen Log-Output eines Hintergrund-Tasks.")
         table.add_row("/bg kill <id>", "Beendet einen laufenden Hintergrund-Task gewaltsam.")
         table.add_row("/delegate <prompt>", "Startet eine headless Google Jules Delegierung im Hintergrund.")
+        table.add_row("/debate <prompt>", "Startet eine Debatte mit Gemini, Groq und OpenRouter.")
         table.add_row("/exit", "Beendet das CLI sicher.")
 
         self.console.print(table)

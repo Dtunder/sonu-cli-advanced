@@ -198,6 +198,23 @@ def main():
                         ui.show_error(str(e))
                 continue
 
+            elif cmd.startswith("/debate"):
+                parts = cmd.split(maxsplit=1)
+                if len(parts) == 1:
+                    ui.show_error("Bitte gib ein Thema an, z.B. `/debate Wie sollten wir Caching implementieren?`")
+                else:
+                    topic = parts[1].strip()
+                    try:
+                        from debate_engine import GroupDebateEngine
+                        engine = GroupDebateEngine(client, ui)
+                        with ui.show_spinner("Starte Gruppen-Debatte..."):
+                            result = engine.run_debate(topic)
+                        print(f"\n--- Bestes Proposal ({result['best_provider']}) ---")
+                        print(result['best_proposal'])
+                    except Exception as e:
+                        ui.show_error(f"Fehler bei der Debatte: {str(e)}")
+                continue
+
             elif cmd.startswith("/delegate"):
                 parts = cmd.split(maxsplit=1)
                 if len(parts) == 1:

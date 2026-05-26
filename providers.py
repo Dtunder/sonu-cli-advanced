@@ -43,6 +43,13 @@ PROVIDERS = {
         "base_url": "https://router.huggingface.co/v1",
         "default_model": "meta-llama/Llama-3.3-70B-Instruct",
     },
+    "ollama": {
+        "label": "Ollama (Local Offline)",
+        "kind": "openai",
+        "env_var": None,
+        "base_url": "http://localhost:11434/v1",
+        "default_model": "llama3",
+    },
 }
 
 

@@ -1,11 +1,36 @@
 import datetime
 import os
+import sqlite3
+import time
 
 class StorageManager:
-    def __init__(self, filename="sonu_log.md"):
+    def __init__(self, filename="sonu_log.md", db_filename="sonu.db"):
         self.filename = filename
+        self.db_filename = db_filename
         self.interaction_count = 0
         self._count_existing_interactions()
+        self._init_db()
+
+    def _init_db(self):
+        try:
+            conn = sqlite3.connect(self.db_filename)
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS token_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    provider TEXT,
+                    model TEXT,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    latency_ms REAL,
+                    estimated_cost_usd REAL
+                )
+            ''')
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Fehler bei der Initialisierung der Datenbank: {e}")
 
     def _count_existing_interactions(self):
         """Versucht, die Anzahl der bereits geloggten Interaktionen zu bestimmen."""
@@ -35,3 +60,17 @@ class StorageManager:
 
     def get_log_path(self):
         return os.path.abspath(self.filename)
+
+    def log_token_usage(self, provider, model, prompt_tokens, completion_tokens, latency_ms, estimated_cost_usd=0.0):
+        timestamp = datetime.datetime.now().isoformat()
+        try:
+            conn = sqlite3.connect(self.db_filename)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO token_logs (timestamp, provider, model, prompt_tokens, completion_tokens, latency_ms, estimated_cost_usd)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (timestamp, provider, model, prompt_tokens, completion_tokens, latency_ms, estimated_cost_usd))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Fehler beim Loggen des Token-Verbrauchs: {e}")
