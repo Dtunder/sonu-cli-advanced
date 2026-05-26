@@ -261,6 +261,70 @@ def delegate_to_subagent(task_description: str, provider: str = None) -> str:
         return f"FEHLER bei Sub-Agenten-Delegierung: {e}"
 
 
+def create_git_branch(branch_name: str) -> str:
+    """Erstellt einen neuen Git-Branch und wechselt in diesen."""
+    try:
+        subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            ["git", "checkout", "-b", branch_name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return f"OK: Branch '{branch_name}' erstellt und ausgecheckt."
+        return f"FEHLER: Konnte Branch nicht erstellen.\n{result.stderr.strip()}"
+    except subprocess.CalledProcessError:
+        return "FEHLER: Nicht in einem Git-Repository."
+    except Exception as e:
+        return f"FEHLER bei Git-Branch-Erstellung: {e}"
+
+def commit_git_changes(message: str) -> str:
+    """Fuegt alle Aenderungen hinzu und committet sie."""
+    try:
+        subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            ["git", "commit", "-m", message],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return f"OK: Aenderungen committet mit Nachricht '{message}'.\n{result.stdout.strip()}"
+        elif "nothing to commit" in result.stdout:
+            return "OK: Keine Aenderungen zu committen."
+        return f"FEHLER beim Committen.\nstdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
+    except subprocess.CalledProcessError as e:
+        if e.cmd[1] == "add":
+            return f"FEHLER beim Hinzufuegen der Dateien: {e.stderr}"
+        return "FEHLER: Nicht in einem Git-Repository."
+    except Exception as e:
+        return f"FEHLER beim Committen: {e}"
+
+def create_github_pull_request(title: str, body: str) -> str:
+    """Erstellt einen Pull Request via GitHub CLI (gh)."""
+    try:
+        formatted_body = f"""# {title}
+
+## Description
+{body}
+
+---
+*Created automatically by Sonu CLI*
+"""
+        result = subprocess.run(
+            ["gh", "pr", "create", "--title", title, "--body", formatted_body],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return f"OK: Pull Request erfolgreich erstellt.\nURL: {result.stdout.strip()}"
+        return f"FEHLER beim Erstellen des Pull Requests.\n{result.stderr.strip()}"
+    except FileNotFoundError:
+         return "FEHLER: GitHub CLI (gh) ist nicht installiert oder nicht im PATH."
+    except Exception as e:
+        return f"FEHLER bei Pull-Request-Erstellung: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Registry: name -> dict(func, declaration, safe)
 # 'safe' = read-only, laeuft ohne Bestaetigung.
@@ -275,6 +339,39 @@ def _str(desc: str) -> types.Schema:
 
 
 REGISTRY = {
+    "create_git_branch": {
+        "func": create_git_branch,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="create_git_branch",
+            description="Erstellt einen neuen Git-Branch und wechselt dorthin.",
+            parameters=_schema({"branch_name": _str("Name des neuen Branches")}, ["branch_name"]),
+        ),
+    },
+    "commit_git_changes": {
+        "func": commit_git_changes,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="commit_git_changes",
+            description="Fuegt alle Aenderungen ('git add .') hinzu und committet sie mit der angegebenen Nachricht.",
+            parameters=_schema({"message": _str("Die Commit-Nachricht")}, ["message"]),
+        ),
+    },
+    "create_github_pull_request": {
+        "func": create_github_pull_request,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="create_github_pull_request",
+            description="Erstellt einen Pull Request auf GitHub mittels 'gh' CLI.",
+            parameters=_schema(
+                {
+                    "title": _str("Titel des Pull Requests"),
+                    "body": _str("Inhalt/Beschreibung des Pull Requests (wird als Markdown formatiert)")
+                },
+                ["title", "body"]
+            ),
+        ),
+    },
     "read_file": {
         "func": read_file,
         "safe": True,
