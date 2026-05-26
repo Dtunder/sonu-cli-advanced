@@ -28,6 +28,16 @@ class StorageManager:
                     estimated_cost_usd REAL
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    question TEXT,
+                    answer TEXT,
+                    success INTEGER,
+                    context_tags TEXT
+                )
+            ''')
             conn.commit()
             conn.close()
         except Exception as e:

@@ -1,6 +1,33 @@
 import os
 import subprocess
 import time
+import sys
+import ast
+
+class LiveHotReloader:
+    def __init__(self):
+        self.reloaded_modules = {}
+
+    def hot_reload(self, file_path: str, module_name: str) -> bool:
+        """AST-basiertes Hot-Reloading zur Laufzeit, ohne Variablenverlust."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                source_code = f.read()
+
+            # Syntaxprüfung via AST
+            ast.parse(source_code)
+
+            # Modul in sys.modules patchen
+            if module_name in sys.modules:
+                mod = sys.modules[module_name]
+                exec(source_code, mod.__dict__)
+                self.reloaded_modules[module_name] = time.time()
+                return True
+            else:
+                return False
+        except Exception as e:
+            print(f"[LiveHotReloader] Fehler beim Neuladen von {module_name}: {e}")
+            return False
 
 class ProcessManager:
     def __init__(self, logs_dir=None):
@@ -12,7 +39,7 @@ class ProcessManager:
         os.makedirs(self.logs_dir, exist_ok=True)
 
     def start_task(self, command):
-        """Startet einen PowerShell-Befehl asynchron im Hintergrund."""
+        """Startet einen Befehl asynchron im Hintergrund (plattformübergreifend)."""
         self.task_counter += 1
         task_id = self.task_counter
         log_path = os.path.join(self.logs_dir, f"task_{task_id}.log")
@@ -20,9 +47,10 @@ class ProcessManager:
         # Logdatei oeffnen und Handle sichern
         log_file = open(log_path, "w", encoding="utf-8", errors="replace")
         
-        # subprocess starten
+        # subprocess starten (plattformübergreifend)
+        cmd_args = ["powershell", "-Command", command] if os.name == 'nt' else ["sh", "-c", command]
         proc = subprocess.Popen(
-            ["powershell", "-Command", command],
+            cmd_args,
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,

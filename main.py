@@ -11,9 +11,25 @@ from prompt_toolkit import prompt
 from sonu_client import SonuClient
 from storage import StorageManager
 from terminal_ui import TerminalUI
+from health_monitor import HealthMonitor
+from evolution_module import EvolutionModule
 
 def main():
     ui = TerminalUI()
+
+    # Feature 1: HealthMonitor starten
+    try:
+        health_monitor = HealthMonitor()
+        health_monitor.start()
+    except Exception as e:
+        ui.show_error(f"Fehler beim Starten des HealthMonitors: {e}")
+
+    # Feature 3: EvolutionModule Trigger prüfen
+    try:
+        evolution_module = EvolutionModule()
+        evolution_module.check_for_evolution_triggers()
+    except Exception as e:
+        ui.show_error(f"Fehler beim Prüfen der Evolution-Trigger: {e}")
     # Headless Task-Mode via Startargument: --task "aufgabe" (oder -t "aufgabe")
     task_description = None
     for i, arg in enumerate(sys.argv):
