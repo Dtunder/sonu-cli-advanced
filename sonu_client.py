@@ -189,6 +189,8 @@ class SonuClient:
 
     def reset_chat(self, history=None):
         """Initialisiert oder resettet die Chat-Session, optional mit erhaltenem Verlauf."""
+        if not self.client:
+            raise Exception("Kein Client konfiguriert.")
         try:
             self.chat = self.client.chats.create(
                 model=self.model_name,
@@ -376,13 +378,14 @@ class SonuClient:
             active_providers.remove("ollama")
             active_providers.append("ollama")
             
-        last_error = None
+        errors = {}
         backoff_schedule = [2, 4, 8]
         
         for prov in active_providers:
             if prov != self.provider:
                 ok, msg = self.set_provider(prov)
                 if not ok:
+                    errors[prov] = msg
                     continue
             
             for attempt in range(len(backoff_schedule) + 1):
@@ -400,10 +403,12 @@ class SonuClient:
                         time.sleep(backoff_schedule[attempt])
                         continue
                         
-                    last_error = e
+                    errors[prov] = str(e)
                     break # Zum naechsten Provider wechseln
                     
-        raise Exception(f"Alle konfigurierten Provider sind fehlgeschlagen! Letzter Fehler: {last_error}")
+        error_msgs = [f"{p}: {err}" for p, err in errors.items()]
+        combined_errors = " | ".join(error_msgs)
+        raise Exception(f"Alle konfigurierten Provider sind fehlgeschlagen! Details: {combined_errors}")
 
     def _run_agent_turn_internal(self, user_input, ui, max_steps=25):
         """Agentischer Loop: sendet die Eingabe, fuehrt angeforderte Tools aus und
