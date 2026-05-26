@@ -10,6 +10,7 @@ from process_manager import ProcessManager
 from memory_manager import MemoryManager
 from multi_provider_client import MultiProviderClient
 from openai_agent import OpenAICompatibleAgent
+from context_compressor import compress_gemini_history
 
 SYSTEM_INSTRUCTION = """Du bist Sonu, ein autonomer Coding- und Recherche-Agent, der direkt im Terminal des Nutzers laeuft.
 
@@ -348,6 +349,12 @@ class SonuClient:
         """
         if self.provider != "gemini":
             return self.oa_agents[self.provider].run_agent_turn(user_input, ui, max_steps)
+
+        if self.chat:
+            old_history = self.chat.get_history()
+            new_history = compress_gemini_history(old_history, self.model_name, self.client)
+            if len(new_history) != len(old_history):
+                self.reset_chat(history=new_history)
 
         resp = self._send_with_rotation(user_input)
 

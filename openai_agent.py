@@ -7,6 +7,7 @@ import tools
 from skills_manager import SkillsManager
 from process_manager import ProcessManager
 from memory_manager import MemoryManager
+from context_compressor import compress_openai_messages
 
 
 class OpenAICompatibleAgent:
@@ -93,6 +94,9 @@ class OpenAICompatibleAgent:
     def run_agent_turn(self, user_input, ui, max_steps=25):
         self.messages.append({"role": "user", "content": user_input})
         
+        # Check and compress before starting the loop
+        self.messages = compress_openai_messages(self.messages, self.model, self)
+
         for _ in range(max_steps):
             try:
                 # Tool Specs vorbereiten
