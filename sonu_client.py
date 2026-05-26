@@ -1,7 +1,9 @@
 import os
+import time
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+
 
 import providers
 import tools
@@ -215,6 +217,9 @@ class SonuClient:
         """Rotiert zum naechsten Key im Pool, erhaelt den Gespraechsverlauf und aktualisiert .env."""
         if len(self.keys) <= 1:
             return False
+
+        # Damping factor: prevent microsecond "contact bounce" when rotating under rate limits
+        time.sleep(0.5)
 
         old_history = None
         try:

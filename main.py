@@ -22,7 +22,7 @@ def main():
 
     try:
         # Standardmodell
-        client = SonuClient(model_name="gemini-3.5-flash")
+        client = SonuClient(model_name="gemini-2.5-flash")
         ui.show_info(f"Sonu Client erfolgreich geladen. Aktives Modell: [bold cyan]{client.model_name}[/bold cyan]")
     except Exception as e:
         ui.show_error(f"Fehler bei der Initialisierung: {str(e)}")
