@@ -12,6 +12,7 @@ from sonu_client import SonuClient
 from storage import StorageManager
 from terminal_ui import TerminalUI
 
+
 def main():
     ui = TerminalUI()
     # Headless Task-Mode via Startargument: --task "aufgabe" (oder -t "aufgabe")
@@ -32,12 +33,23 @@ def main():
         # Standardmodell
         client = SonuClient()
         if not task_description:
-            ui.show_info(f"Sonu Client erfolgreich geladen. Aktives Modell: [bold cyan]{client.model_name}[/bold cyan]")
+            ui.show_info(
+                f"Sonu Client erfolgreich geladen. Aktives Modell: [bold cyan]{client.model_name}[/bold cyan]"
+            )
     except Exception as e:
         ui.show_error(f"Fehler bei der Initialisierung: {str(e)}")
         sys.exit(1)
 
     storage = StorageManager()
+
+    # Start HealthMonitor for system stability
+    try:
+        from health_monitor import HealthMonitor
+
+        health_monitor = HealthMonitor()
+        health_monitor.start()
+    except Exception as e:
+        ui.show_error(f"Failed to start HealthMonitor: {e}")
 
     if task_description:
         try:
@@ -53,10 +65,10 @@ def main():
         try:
             # Eingabe über prompt_toolkit
             user_input = prompt("\nDu: ")
-            
+
             # Entferne führende/folgende Leerzeichen
             cmd = user_input.strip()
-            
+
             if not cmd:
                 continue
 
@@ -64,11 +76,11 @@ def main():
             if cmd.lower() in ["exit", "quit", "beenden", "/exit"]:
                 print("Auf Wiedersehen!")
                 break
-                
+
             elif cmd == "/help":
                 ui.show_help()
                 continue
-                
+
             elif cmd == "/models":
                 with ui.show_spinner("Lade verfügbare Modelle..."):
                     try:
@@ -81,21 +93,25 @@ def main():
                     print(f"  • {m}")
                 print()
                 continue
-                
+
             elif cmd.startswith("/model"):
                 parts = cmd.split(maxsplit=1)
                 if len(parts) == 1:
-                    ui.show_info(f"Aktives Modell: [bold cyan]{client.model_name}[/bold cyan]")
+                    ui.show_info(
+                        f"Aktives Modell: [bold cyan]{client.model_name}[/bold cyan]"
+                    )
                 else:
                     new_model = parts[1].strip()
                     with ui.show_spinner(f"Wechsle zu Modell '{new_model}'..."):
                         try:
                             client.set_model(new_model)
-                            ui.show_info(f"Erfolgreich zu Modell [bold cyan]{new_model}[/bold cyan] gewechselt!")
+                            ui.show_info(
+                                f"Erfolgreich zu Modell [bold cyan]{new_model}[/bold cyan] gewechselt!"
+                            )
                         except Exception as e:
                             ui.show_error(f"Modellwechsel fehlgeschlagen: {str(e)}")
                 continue
-                
+
             elif cmd == "/history":
                 path = storage.get_log_path()
                 count = storage.interaction_count
@@ -108,8 +124,11 @@ def main():
             elif cmd.startswith("/provider"):
                 parts = cmd.split(maxsplit=1)
                 import providers
+
                 if len(parts) == 1:
-                    ui.show_info(f"Aktiver Provider: [bold cyan]{client.provider}[/bold cyan]")
+                    ui.show_info(
+                        f"Aktiver Provider: [bold cyan]{client.provider}[/bold cyan]"
+                    )
                     print("\nVerfügbare Provider:")
                     for p in providers.list_providers():
                         prov_info = providers.get_provider(p)
@@ -142,29 +161,36 @@ def main():
                     print(f"  • {s} {marker}")
                 print()
                 continue
-                
+
             elif cmd.startswith("/activate"):
                 parts = cmd.split(maxsplit=1)
                 if len(parts) == 1:
-                    ui.show_error("Bitte gib den Namen des Skills an, z.B. `/activate cybernetic-thinking`")
+                    ui.show_error(
+                        "Bitte gib den Namen des Skills an, z.B. `/activate cybernetic-thinking`"
+                    )
                 else:
                     skill_name = parts[1].strip()
                     try:
                         client.skills_mgr.activate_skill(skill_name)
                         client.reset_chat()
-                        ui.show_info(f"Experten-Skill [bold yellow]{skill_name}[/bold yellow] erfolgreich aktiviert!")
+                        ui.show_info(
+                            f"Experten-Skill [bold yellow]{skill_name}[/bold yellow] erfolgreich aktiviert!"
+                        )
                     except Exception as e:
                         ui.show_error(str(e))
                 continue
-                
+
             elif cmd == "/deactivate":
                 client.skills_mgr.deactivate_skill()
                 client.reset_chat()
-                ui.show_info("Experten-Skill deaktiviert. Baseline-Prompt wiederhergestellt.")
+                ui.show_info(
+                    "Experten-Skill deaktiviert. Baseline-Prompt wiederhergestellt."
+                )
                 continue
 
             elif cmd == "/memory":
                 import os as _os
+
                 mem = client.memory_mgr.load_memory(_os.getcwd())
                 if mem.strip():
                     print("\n--- Aktives 4-Ebenen-Gedächtnis ---\n")
@@ -181,7 +207,9 @@ def main():
                 else:
                     print("\nAktive Hintergrundprozesse:")
                     for t in tasks:
-                        print(f"  [{t['id']}] {t['command']} - Status: {t['status']} (Laufzeit: {t['elapsed']})")
+                        print(
+                            f"  [{t['id']}] {t['command']} - Status: {t['status']} (Laufzeit: {t['elapsed']})"
+                        )
                     print()
                 continue
 
@@ -220,16 +248,19 @@ def main():
             elif cmd.startswith("/debate"):
                 parts = cmd.split(maxsplit=1)
                 if len(parts) == 1:
-                    ui.show_error("Bitte gib ein Thema an, z.B. `/debate Wie sollten wir Caching implementieren?`")
+                    ui.show_error(
+                        "Bitte gib ein Thema an, z.B. `/debate Wie sollten wir Caching implementieren?`"
+                    )
                 else:
                     topic = parts[1].strip()
                     try:
                         from debate_engine import GroupDebateEngine
+
                         engine = GroupDebateEngine(client, ui)
                         with ui.show_spinner("Starte Gruppen-Debatte..."):
                             result = engine.run_debate(topic)
                         print(f"\n--- Bestes Proposal ({result['best_provider']}) ---")
-                        print(result['best_proposal'])
+                        print(result["best_proposal"])
                     except Exception as e:
                         ui.show_error(f"Fehler bei der Debatte: {str(e)}")
                 continue
@@ -237,14 +268,22 @@ def main():
             elif cmd.startswith("/delegate"):
                 parts = cmd.split(maxsplit=1)
                 if len(parts) == 1:
-                    ui.show_error("Bitte gib die Aufgabe an, z.B. `/delegate Refactor active_client.py`")
+                    ui.show_error(
+                        "Bitte gib die Aufgabe an, z.B. `/delegate Refactor active_client.py`"
+                    )
                 else:
                     import os
+
                     prompt_text = parts[1].strip()
-                    with ui.show_spinner("Initialisiere Google Jules im Hintergrund..."):
+                    with ui.show_spinner(
+                        "Initialisiere Google Jules im Hintergrund..."
+                    ):
                         try:
-                            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jules_delegator.py")
-                            jcmd = f"python \"{script_path}\" \"{prompt_text}\""
+                            script_path = os.path.join(
+                                os.path.dirname(os.path.abspath(__file__)),
+                                "jules_delegator.py",
+                            )
+                            jcmd = f'python "{script_path}" "{prompt_text}"'
                             tid = client.process_mgr.start_task(jcmd)
                             ui.show_info(
                                 f"Google Jules erfolgreich im Hintergrund delegiert (Task-ID [bold yellow]{tid}[/bold yellow]).\n"
@@ -257,17 +296,27 @@ def main():
             elif cmd.startswith("/distill"):
                 parts = cmd.split(maxsplit=1)
                 if len(parts) == 1:
-                    ui.show_error("Bitte gib einen Namen fuer das Skill an, z.B. `/distill react-debugger`")
+                    ui.show_error(
+                        "Bitte gib einen Namen fuer das Skill an, z.B. `/distill react-debugger`"
+                    )
                 else:
                     skill_name = parts[1].strip()
-                    with ui.show_spinner(f"Distilliere Workflow in Skill '{skill_name}'..."):
+                    with ui.show_spinner(
+                        f"Distilliere Workflow in Skill '{skill_name}'..."
+                    ):
                         try:
                             # Lese die letzten ~10.000 Zeichen aus dem Log
                             log_path = storage.get_log_path()
                             log_content = ""
                             if __import__("os").path.exists(log_path):
                                 with open(log_path, "r", encoding="utf-8") as f:
-                                    f.seek(max(0, __import__("os").path.getsize(log_path) - 10000))
+                                    f.seek(
+                                        max(
+                                            0,
+                                            __import__("os").path.getsize(log_path)
+                                            - 10000,
+                                        )
+                                    )
                                     log_content = f.read()
 
                             distill_prompt = (
@@ -277,27 +326,34 @@ def main():
                                 "Antworte NUR mit den reinen Instruktionen fuer das Skill-Profil, kein Vorgeplaenkel.\n\n"
                                 f"LOGS:\n{log_content}"
                             )
-                            
+
                             # Wir nutzen den aktiven Provider statenlos
                             if client.provider == "gemini":
                                 resp = client.client.models.generate_content(
-                                    model=client.model_name,
-                                    contents=distill_prompt
+                                    model=client.model_name, contents=distill_prompt
                                 )
                                 skill_instruction = resp.text
                             else:
                                 oa_agent = client.oa_agents[client.provider]
                                 resp = oa_agent.client.chat.completions.create(
                                     model=oa_agent.model,
-                                    messages=[{"role": "user", "content": distill_prompt}]
+                                    messages=[
+                                        {"role": "user", "content": distill_prompt}
+                                    ],
                                 )
                                 skill_instruction = resp.choices[0].message.content
 
                             # Skill speichern
-                            path = client.skills_mgr.save_skill(skill_name, skill_instruction)
-                            ui.show_info(f"Skill erfolgreich destilliert und unter [cyan]{path}[/cyan] gespeichert!\nDu kannst es jetzt mit `/activate {skill_name}` nutzen.")
+                            path = client.skills_mgr.save_skill(
+                                skill_name, skill_instruction
+                            )
+                            ui.show_info(
+                                f"Skill erfolgreich destilliert und unter [cyan]{path}[/cyan] gespeichert!\nDu kannst es jetzt mit `/activate {skill_name}` nutzen."
+                            )
                         except Exception as e:
-                            ui.show_error(f"Fehler bei der Skill-Distillation: {str(e)}")
+                            ui.show_error(
+                                f"Fehler bei der Skill-Distillation: {str(e)}"
+                            )
                 continue
 
             # Agentischer Turn: das Modell darf selbststaendig Werkzeuge nutzen.
@@ -321,6 +377,7 @@ def main():
             break
         except Exception as e:
             ui.show_error(f"Ein Fehler ist aufgetreten: {str(e)}")
+
 
 if __name__ == "__main__":
     main()
