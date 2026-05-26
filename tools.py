@@ -362,6 +362,57 @@ def create_github_pull_request(title: str, body: str) -> str:
 # 'safe' = read-only, laeuft ohne Bestaetigung.
 # ---------------------------------------------------------------------------
 
+
+def capture_and_analyze_viewport(prompt: str = "Analysiere dieses UI. Was ist kaputt und wie laesst es sich beheben?") -> str:
+    """Macht einen Screenshot des aktuellen Bildschirms, konvertiert ihn zu Base64 und sendet ihn zur Multimodal-Analyse an Gemini."""
+    try:
+        import mss
+        import base64
+        import tempfile
+        import os
+        from google import genai
+        from google.genai import types
+
+        # Take screenshot
+        with mss.mss() as sct:
+            filename = sct.shot(mon=-1, output=os.path.join(tempfile.gettempdir(), 'screenshot.png'))
+
+        # Read and convert to base64
+        with open(filename, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+        # Clean up
+        try:
+            os.remove(filename)
+        except Exception:
+            pass
+
+        # Call Gemini Vision API
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return "FEHLER: GEMINI_API_KEY ist nicht gesetzt."
+
+        client = genai.Client(api_key=api_key)
+
+        # Prepare the payload for Gemini multimodal
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                prompt,
+                types.Part.from_bytes(
+                    data=base64.b64decode(encoded_string),
+                    mime_type='image/png',
+                ),
+            ]
+        )
+
+        return f"OK: Screenshot analysiert.\nErgebnis: {response.text}"
+    except ImportError as e:
+        return f"FEHLER: Benötigte Bibliothek fehlt. Führe 'pip install mss Pillow' aus.\nDetails: {e}"
+    except Exception as e:
+        return f"FEHLER bei Screenshot-Analyse: {e}"
+
+
 def _schema(props: dict, required: list) -> types.Schema:
     return types.Schema(type=types.Type.OBJECT, properties=props, required=required)
 
@@ -371,6 +422,18 @@ def _str(desc: str) -> types.Schema:
 
 
 REGISTRY = {
+    "capture_and_analyze_viewport": {
+        "func": capture_and_analyze_viewport,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="capture_and_analyze_viewport",
+            description="Macht einen Screenshot des aktuellen Bildschirms und sendet ihn zur Multimodal-Analyse an Gemini.",
+            parameters=_schema({
+                "prompt": _str("Optionaler Prompt für die Analyse (z.B. nach UI Bugs suchen).")
+            }, []),
+        ),
+    },
+
     "create_git_branch": {
         "func": create_git_branch,
         "safe": False,
