@@ -338,6 +338,44 @@ def _str(desc: str) -> types.Schema:
     return types.Schema(type=types.Type.STRING, description=desc)
 
 
+
+def dispatch_research_agent(query: str) -> str:
+    """Startet einen parallelen Research-Agenten, der asynchron recherchiert."""
+    try:
+        from agent_orchestrator import LocalCloudOrchestrator
+        import terminal_ui
+        import asyncio
+
+        ui = terminal_ui.TerminalUI()
+        orchestrator = LocalCloudOrchestrator(ui)
+        orchestrator.dispatch_research_agent(query)
+
+        loop = asyncio.get_event_loop()
+        results = loop.run_until_complete(orchestrator.wait_for_all())
+        return str(results.get("ResearchAgent", {}).get("result", "Keine Ergebnisse."))
+    except Exception as e:
+        return f"Research failed: {e}"
+
+def dispatch_testing_agent(test_command: str) -> str:
+    """Startet einen parallelen Testing-Agenten, der die Tests ausfuehrt und Ergebnisse validiert."""
+    try:
+        from agent_orchestrator import LocalCloudOrchestrator
+        import terminal_ui
+        import asyncio
+
+        ui = terminal_ui.TerminalUI()
+        orchestrator = LocalCloudOrchestrator(ui)
+        orchestrator.dispatch_testing_agent(test_command)
+
+        loop = asyncio.get_event_loop()
+        results = loop.run_until_complete(orchestrator.wait_for_all())
+
+        status = results.get("TestingAgent", {}).get("status", "unknown")
+        result = results.get("TestingAgent", {}).get("result", "")
+        return f"Test Status: {status}\nOutput: {result}"
+    except Exception as e:
+        return f"Testing failed: {e}"
+
 REGISTRY = {
     "create_git_branch": {
         "func": create_git_branch,
@@ -494,6 +532,28 @@ REGISTRY = {
             name="delegate_to_jules",
             description="Delegiert eine komplexe Programmieraufgabe an Google Jules headless im Hintergrund. Polle danach den Output, um die Fertigstellung zu ueberwachen.",
             parameters=_schema({"prompt": _str("Detaillierter Prompt der Aufgabe fuer Google Jules.")}, ["prompt"]),
+        ),
+    },
+    "dispatch_research_agent": {
+        "func": dispatch_research_agent,
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="dispatch_research_agent",
+            description="Startet einen spezialisierten, parallelen Sub-Agenten fuer komplexe File- und Kontext-Recherche.",
+            parameters=_schema({
+                "query": _str("Der Suchbegriff oder das Thema fuer den Research-Agenten.")
+            }, ["query"]),
+        ),
+    },
+    "dispatch_testing_agent": {
+        "func": dispatch_testing_agent,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="dispatch_testing_agent",
+            description="Delegiert das Ausfuehren und Validieren von Tests an einen isolierten Testing-Agenten.",
+            parameters=_schema({
+                "test_command": _str("Der Test-Befehl (z.B. 'pytest test_file.py').")
+            }, ["test_command"]),
         ),
     },
     "delegate_to_subagent": {

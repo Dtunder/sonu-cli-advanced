@@ -187,7 +187,7 @@ class SwarmConsensusServer:
         )
         self.bus.publish(session_id, "Agent-Architect", proposal)
         self.ui.show_info(f"Agent-Architect Proposal:\n{proposal[:300]}...\n[...]")
-        
+
         self.ui.show_agent_thought("Swarm is debating: [Agent-Critic] and [Agent-Security] are analyzing...")
         critique_prompt = f"Original Request: {prompt}\n\nArchitect's Proposal:\n{proposal}\n\nPlease review this proposal based on your role, provide feedback, and end with a score."
 
@@ -210,9 +210,14 @@ class SwarmConsensusServer:
             }
             
             for future in concurrent.futures.as_completed(future_to_agent):
-                agent_name, response, score = future.result()
-                results[agent_name] = {"response": response, "score": score}
-                self.ui.show_info(f"[{agent_name}] Score: {score}/10")
+                try:
+                    agent_name, response, score = future.result()
+                    results[agent_name] = {"response": response, "score": score}
+                    self.ui.show_info(f"[{agent_name}] Score: {score}/10")
+                except Exception as e:
+                    agent_name = future_to_agent[future]
+                    self.ui.show_error(f"Failed to get critique from {agent_name}: {e}")
+                    results[agent_name] = {"response": f"Failed: {e}", "score": 0.0}
 
         scores = [results["Agent-Critic"]["score"], results["Agent-Security"]["score"]]
         matrix_score = sum(scores) / len(scores) if scores else 0.0
@@ -259,7 +264,11 @@ class SwarmConsensusServer:
             if current_branch != target_branch:
                 self.ui.show_info(f"Currently on {current_branch}. Switching to {target_branch} branch to enforce commit rule.")
                 try:
-                    subprocess.run(["git", "stash"], check=False)
+                    # Check if dirty
+                    status_out = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True).stdout
+                    if status_out.strip():
+                        self.ui.show_error("Working directory is not clean. Commit or stash your changes before running SwarmConsensusServer.")
+                        return
                     subprocess.run(["git", "checkout", target_branch], check=True)
                 except subprocess.CalledProcessError:
                     self.ui.show_error(f"Failed to checkout {target_branch} branch. Changes can only be committed to the master branch.")
@@ -285,7 +294,6 @@ class SwarmConsensusServer:
 
             if current_branch != target_branch:
                 subprocess.run(["git", "checkout", current_branch], check=True)
-                subprocess.run(["git", "stash", "pop"], check=False)
                 
         except subprocess.CalledProcessError:
             self.logger.warning("Git commit failed or not in a git repository. Skipping actual git operations.")
