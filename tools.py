@@ -262,9 +262,15 @@ def delegate_to_subagent(task_description: str, provider: str = None) -> str:
 
 
 def create_git_branch(branch_name: str) -> str:
-    """Erstellt einen neuen Git-Branch und wechselt in diesen."""
+    """Erstellt einen neuen Git-Branch und wechselt in diesen. Falls er existiert, wird dorthin gewechselt."""
     try:
         subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
+        # Check if branch exists
+        check_branch = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"], capture_output=True)
+        if check_branch.returncode == 0:
+            subprocess.run(["git", "checkout", branch_name], check=True, capture_output=True, text=True)
+            return f"OK: Branch '{branch_name}' existiert bereits. Dorthin gewechselt."
+
         result = subprocess.run(
             ["git", "checkout", "-b", branch_name],
             capture_output=True,
@@ -273,13 +279,13 @@ def create_git_branch(branch_name: str) -> str:
         if result.returncode == 0:
             return f"OK: Branch '{branch_name}' erstellt und ausgecheckt."
         return f"FEHLER: Konnte Branch nicht erstellen.\n{result.stderr.strip()}"
-    except subprocess.CalledProcessError:
-        return "FEHLER: Nicht in einem Git-Repository."
+    except subprocess.CalledProcessError as e:
+        return f"FEHLER bei Git-Checkout: {e.stderr if hasattr(e, 'stderr') else str(e)}"
     except Exception as e:
         return f"FEHLER bei Git-Branch-Erstellung: {e}"
 
 def commit_git_changes(message: str) -> str:
-    """Fuegt alle Aenderungen hinzu und committet sie."""
+    """Fuegt alle Aenderungen hinzu, committet sie und pusht den aktuellen Branch auf remote."""
     try:
         subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
         subprocess.run(["git", "add", "."], check=True, capture_output=True, text=True)
@@ -288,10 +294,26 @@ def commit_git_changes(message: str) -> str:
             capture_output=True,
             text=True,
         )
+
+        # Determine if there's anything to push even if commit said "nothing to commit"
+        push_msg = ""
+
+        # Get current branch
+        branch_res = subprocess.run(["git", "branch", "--show-current"], check=True, capture_output=True, text=True)
+        branch = branch_res.stdout.strip()
+
+        # Push to remote
+        push_res = subprocess.run(["git", "push", "-u", "origin", "HEAD"], capture_output=True, text=True)
+        if push_res.returncode == 0:
+            push_msg = f"\nErfolgreich auf 'origin/{branch}' gepusht."
+        else:
+            push_msg = f"\nWARNUNG: Konnte nicht pushen: {push_res.stderr.strip()}"
+
         if result.returncode == 0:
-            return f"OK: Aenderungen committet mit Nachricht '{message}'.\n{result.stdout.strip()}"
+            return f"OK: Aenderungen committet mit Nachricht '{message}'.\n{result.stdout.strip()}{push_msg}"
         elif "nothing to commit" in result.stdout:
-            return "OK: Keine Aenderungen zu committen."
+            return f"OK: Keine Aenderungen zu committen.{push_msg}"
+
         return f"FEHLER beim Committen.\nstdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
     except subprocess.CalledProcessError as e:
         if e.cmd[1] == "add":
@@ -311,8 +333,18 @@ def create_github_pull_request(title: str, body: str) -> str:
 ---
 *Created automatically by Sonu CLI*
 """
+        # Check for existing PR first
+        pr_check = subprocess.run(["gh", "pr", "view", "--json", "url"], capture_output=True, text=True)
+        if pr_check.returncode == 0:
+            import json
+            try:
+                pr_data = json.loads(pr_check.stdout)
+                return f"OK: Ein Pull Request existiert bereits fuer diesen Branch.\nURL: {pr_data.get('url')}"
+            except Exception:
+                pass
+
         result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", formatted_body],
+            ["gh", "pr", "create", "--title", title, "--body", formatted_body, "--head", "@"],
             capture_output=True,
             text=True,
         )
