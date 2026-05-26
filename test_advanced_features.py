@@ -80,12 +80,46 @@ def test_process_manager():
     print("[SUCCESS] ProcessManager erfolgreich getestet!\n")
 
 
+def test_live_hot_reloader():
+    print("[TEST] Teste LiveHotReloader...")
+    import process_manager
+    import sys
+
+    # Create a dummy module in sys.modules
+    import types
+    dummy = types.ModuleType('dummy_hot_reload')
+    dummy.state_var = "original_state"
+    dummy.get_info = lambda: "original_logic"
+    sys.modules['dummy_hot_reload'] = dummy
+
+    # Verify initial
+    assert sys.modules['dummy_hot_reload'].get_info() == "original_logic"
+
+    # Inject new AST logic
+    new_code = '''
+def get_info():
+    return "updated_logic"
+'''
+    success = process_manager.LiveHotReloader.reload_module('dummy_hot_reload', new_code)
+    assert success is True
+    assert sys.modules['dummy_hot_reload'].get_info() == "updated_logic"
+
+    # Verify we can rehabilitate state
+    success = process_manager.LiveHotReloader.rehabilitate_state('dummy_hot_reload', {'state_var': 'rehabilitated_state', 'new_var': 123})
+    assert success is True
+    assert sys.modules['dummy_hot_reload'].state_var == "rehabilitated_state"
+    assert sys.modules['dummy_hot_reload'].new_var == 123
+
+    print("[SUCCESS] LiveHotReloader erfolgreich getestet!\n")
+
+
 if __name__ == "__main__":
     print("=== STARTE AUTOMATISIERTE VALIDIERUNG DER ADVANCED-ARCHITEKTUR ===\n")
     try:
         test_memory_manager()
         test_skills_manager()
         test_process_manager()
+        test_live_hot_reloader()
         print("=== ALLE TESTS ERFOLGREICH BESTANDEN! ===")
         sys.exit(0)
     except AssertionError as e:

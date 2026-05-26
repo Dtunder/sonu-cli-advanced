@@ -55,10 +55,13 @@ def run_watchdog(target_script):
             
             ui.show_info("[bold magenta]🧠 Analysiere Crash und delegiere Fix an Sonu...[/bold magenta]")
             
+            # Provide the module's state variable namespace if a LiveHotReloader injection is desired,
+            # or direct it to output code and variables so the Watchdog can Hot-Reload it.
             prompt = (
                 f"Dein Cybernetic Watchdog hat festgestellt, dass das Skript `{target_script}` abgestuerzt ist.\n"
                 f"Hier ist der Stderr Traceback:\n```\n{stderr}\n```\n\n"
                 f"Nutze deine Tools (`read_file`, `edit_file`, `run_shell`), um den Fehler zu finden und den Code zu reparieren. "
+                f"Du hast Zugriff auf 'LiveHotReloader' in 'process_manager.py' falls der Prozess stattdessen heiss repariert werden soll.\n"
                 f"Keine Erklaerungen, fix es einfach chirurgisch."
             )
             

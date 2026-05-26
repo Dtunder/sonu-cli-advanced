@@ -111,3 +111,49 @@ class ProcessManager:
             pass
             
         return True
+
+import ast
+import sys
+import importlib
+
+class LiveHotReloader:
+    """Neural AST Hot-Reloading & Live State Repair.
+    Allows hot-swapping modified class definitions and functions in running Python
+    background processes without losing in-memory variables/state.
+    """
+
+    @staticmethod
+    def reload_module(module_name, new_source_code):
+        """Compiles new AST node and injects it directly into the running module."""
+        if module_name not in sys.modules:
+            raise ImportError(f"Module {module_name} is not loaded.")
+
+        module = sys.modules[module_name]
+
+        # Parse and compile the new source code
+        try:
+            tree = ast.parse(new_source_code)
+            compiled_code = compile(tree, filename=f"<hot-reload-{module_name}>", mode='exec')
+
+            # Execute the compiled code in the module's namespace
+            exec(compiled_code, module.__dict__)
+            return True
+        except Exception as e:
+            print(f"[HotReload] Error reloading module {module_name}: {e}")
+            return False
+
+    @staticmethod
+    def rehabilitate_state(module_name, state_dict):
+        """Forces a state-rehabilitation loop by injecting the provided state into the module."""
+        if module_name not in sys.modules:
+            raise ImportError(f"Module {module_name} is not loaded.")
+
+        module = sys.modules[module_name]
+
+        try:
+            for key, value in state_dict.items():
+                setattr(module, key, value)
+            return True
+        except Exception as e:
+            print(f"[HotReload] Error rehabilitating state for {module_name}: {e}")
+            return False
