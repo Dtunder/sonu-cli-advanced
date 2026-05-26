@@ -215,7 +215,7 @@ def delegate_to_jules(prompt: str) -> str:
     except Exception as e:
         return f"FEHLER beim Starten der Jules-Delegierung: {e}"
 
-def delegate_to_subagent(task_description: str, provider: str = None) -> str:
+def delegate_to_subagent(task_description: str, provider: str = None, skill: str = None) -> str:
     """Delegiert eine isolierte Teilaufgabe an einen autonomen Sub-Agenten (headless)."""
     try:
         from sonu_client import SonuClient
@@ -251,6 +251,14 @@ def delegate_to_subagent(task_description: str, provider: str = None) -> str:
         if provider and providers.get_provider(provider):
             client.set_provider(provider)
             
+        # Activate specific skill if specified
+        if skill:
+            try:
+                client.set_skill(skill)
+                ui.log.append(f"=== Aktiviere Experten-Skill: {skill} ===")
+            except Exception as e:
+                ui.log.append(f"WARNUNG: Konnte Skill '{skill}' nicht aktivieren: {e}")
+
         ui.log.append(f"=== Starte autonomen Sub-Agenten (Provider: {client.provider}) ===")
         
         final_answer = client.run_agent_turn(f"SUB-AGENT TASK: {task_description}\nErledige dies autonom. Verwende deine Werkzeuge (lies Dateien, suche, etc). Antworte am Ende mit einer ausfuehrlichen, endgueltigen Zusammenfassung deiner Ergebnisse und Analysen.", ui, max_steps=15)
@@ -599,7 +607,8 @@ REGISTRY = {
             description="Delegiert eine Recherche, Analyse oder Coding-Teilaufgabe an einen isolierten, autonomen Sonu-Subagenten. Verhindert, dass dein eigener Kontext ueberflutet wird. Gib ihm eine SEHR ausfuehrliche Anweisung.",
             parameters=_schema({
                 "task_description": _str("Detaillierte Anweisung und Ziel fuer den Sub-Agenten."),
-                "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten.")
+                "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten."),
+                "skill": _str("Optional: Name eines Experten-Skills, das der Subagent aktivieren soll (z.B. 'fullstack-developer', 'security-auditor', 'devops-engineer').")
             }, ["task_description"]),
         ),
     },
