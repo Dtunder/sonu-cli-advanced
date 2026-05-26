@@ -278,10 +278,7 @@ class SwarmConsensusServer:
                 subprocess.run(["git", "commit", "-m", commit_msg], check=True)
                 self.ui.show_info("Patch successfully applied and committed.")
             except subprocess.CalledProcessError as e:
-                self.ui.show_error(f"Failed to apply patch: {e}. Committing as swarm_failed_edit.patch instead.")
-                subprocess.run(["git", "add", "swarm_edit.patch"], check=True)
-                commit_msg = f"Swarm Consensus Edit (Failed Patch): {prompt[:50]}..."
-                subprocess.run(["git", "commit", "-m", commit_msg], check=True)
+                self.ui.show_error(f"Failed to apply patch: {e}. Changes rejected.")
             finally:
                 if os.path.exists("swarm_edit.patch"):
                     os.remove("swarm_edit.patch")

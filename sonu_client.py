@@ -262,6 +262,7 @@ class SonuClient:
         for attempt in range(len(backoff_schedule) + 1):
             try:
                 # Versuche alle Keys im Pool
+                last_error = None
                 for _ in range(max(1, len(self.keys))):
                     try:
                         start_time = time.time()
@@ -286,11 +287,16 @@ class SonuClient:
 
                         return resp
                     except Exception as e:
+                        last_error = e
                         err_str = str(e)
                         if self._is_quota_error(err_str) and len(self.keys) > 1:
                             if self.rotate_key():
                                 continue
-                        raise
+                        raise e
+
+                # Wenn die Schleife durchläuft ohne return, sind alle Keys erschöpft
+                if last_error:
+                    raise Exception(f"Alle {len(self.keys)} API-Keys haben die Tagesquota für '{self.model_name}' erschöpft. Letzter Fehler: {str(last_error)}")
             except Exception as e:
                 err_str = str(e)
                 if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):
@@ -309,6 +315,7 @@ class SonuClient:
         
         for attempt in range(len(backoff_schedule) + 1):
             try:
+                last_error = None
                 for _ in range(max(1, len(self.keys))):
                     try:
                         response_stream = self.chat.send_message_stream(message)
@@ -327,11 +334,15 @@ class SonuClient:
                             yield from []
                         return empty_generator()
                     except Exception as e:
+                        last_error = e
                         err_str = str(e)
                         if self._is_quota_error(err_str) and len(self.keys) > 1:
                             if self.rotate_key():
                                 continue
-                        raise
+                        raise e
+
+                if last_error:
+                    raise Exception(f"Alle {len(self.keys)} API-Keys haben die Tagesquota für '{self.model_name}' erschöpft. Letzter Fehler: {str(last_error)}")
             except Exception as e:
                 err_str = str(e)
                 if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):
