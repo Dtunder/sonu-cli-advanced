@@ -46,7 +46,7 @@ class TerminalUI:
 
     def show_spinner(self, message="Sonu denkt nach..."):
         """Gibt ein Context-Manager Objekt für den Spinner zurück."""
-        return self.console.status(f"[bold yellow]{message}[/bold yellow]", spinner="dots")
+        return self.console.status(f"[bold yellow]{message}[/bold yellow]", spinner="bouncingBar")
 
     def display_response(self, text):
         self.console.print("\n[bold magenta]✦ Sonu:[/bold magenta]")

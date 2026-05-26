@@ -254,6 +254,37 @@ def main():
                             ui.show_error(f"Fehler bei der Jules-Delegierung: {str(e)}")
                 continue
 
+            elif cmd.startswith("/auto"):
+                parts = cmd.split(maxsplit=1)
+                if len(parts) == 1:
+                    ui.show_error("Bitte gib das Ziel an, z.B. `/auto Mache die CLI 100 mal besser`")
+                else:
+                    ziel = parts[1].strip()
+                    ui.show_info(f"Starte autonomen Modus. Ziel: [bold cyan]{ziel}[/bold cyan]")
+                    ui.set_yolo(True)
+
+                    # Ensure active loop
+                    current_prompt = f"Erreiche folgendes Ziel autonom:\n\n{ziel}\n\nWenn du fertig bist, gib exakt 'ZIEL ERREICHT' am Ende deiner Antwort aus."
+
+                    step_count = 0
+                    max_steps = 50
+                    while step_count < max_steps:
+                        step_count += 1
+                        response = client.run_agent_turn(current_prompt, ui)
+                        if response:
+                            ui.display_response(response)
+                            storage.log_interaction(current_prompt, response)
+                            if "ZIEL ERREICHT" in response:
+                                ui.show_info("Autonomer Modus erfolgreich beendet (ZIEL ERREICHT).")
+                                break
+                            current_prompt = "Fahre mit dem naechsten Schritt fort."
+                        else:
+                            ui.show_error("Agent gab keine Antwort, breche Auto-Loop ab.")
+                            break
+                    if step_count >= max_steps:
+                        ui.show_error("Autonomer Modus abgebrochen: Maximale Anzahl an Schritten (50) erreicht.")
+                continue
+
             elif cmd.startswith("/distill"):
                 parts = cmd.split(maxsplit=1)
                 if len(parts) == 1:

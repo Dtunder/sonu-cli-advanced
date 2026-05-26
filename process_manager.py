@@ -21,8 +21,13 @@ class ProcessManager:
         log_file = open(log_path, "w", encoding="utf-8", errors="replace")
         
         # subprocess starten
+        if os.name == 'nt':
+            cmd_args = ["powershell", "-Command", command]
+        else:
+            cmd_args = ["sh", "-c", command]
+
         proc = subprocess.Popen(
-            ["powershell", "-Command", command],
+            cmd_args,
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,
