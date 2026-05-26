@@ -372,6 +372,20 @@ class SonuClient:
             self.set_provider("ollama")
 
         active_providers = [self.provider] + self._get_fallback_providers()
+
+        # Use ArbitrageOptimizer to find the best provider for this turn if online
+        if is_online:
+            try:
+                from multi_provider_client import ArbitrageOptimizer
+                opt = ArbitrageOptimizer()
+                best_provider = opt.route_task(user_input, active_providers)
+                if best_provider and best_provider in active_providers:
+                    # Move best provider to the front
+                    active_providers.remove(best_provider)
+                    active_providers.insert(0, best_provider)
+            except Exception as e:
+                pass
+
         if "ollama" in active_providers and active_providers[0] != "ollama":
             active_providers.remove("ollama")
             active_providers.append("ollama")
