@@ -341,13 +341,18 @@ class SonuClient:
         
         return None
 
-    def _get_fallback_providers(self):
+    def _get_fallback_providers(self, is_online=True):
         """Findet alle Provider, fuer die ein API-Key in der .env existiert, ausser dem aktuellen."""
         available = []
         for p in providers.list_providers():
             if p == self.provider: 
                 continue
             prov_info = providers.get_provider(p)
+
+            # Wenn offline, ueberspringe Provider, die einen API-Key/Internet benoetigen
+            if not is_online and prov_info["env_var"] is not None:
+                continue
+
             # Offline-Provider haben keinen env_var, online muessen einen Key haben.
             if prov_info["env_var"] is None or os.getenv(prov_info["env_var"]):
                 available.append(p)
@@ -371,11 +376,20 @@ class SonuClient:
         if not is_online and "ollama" in providers.list_providers() and self.provider != "ollama":
             self.set_provider("ollama")
 
-        active_providers = [self.provider] + self._get_fallback_providers()
-        if "ollama" in active_providers and active_providers[0] != "ollama":
+        active_providers = [self.provider] + self._get_fallback_providers(is_online)
+
+        # Ollama als absoluter Fallback ans Ende setzen, wenn wir online sind und es nicht der aktive Provider ist
+        if is_online and "ollama" in active_providers and active_providers[0] != "ollama":
             active_providers.remove("ollama")
             active_providers.append("ollama")
             
+        # Wenn wir offline sind und Ollama nicht der aktive ist (was durch set_provider oben eigentlich schon passiert)
+        if not is_online and "ollama" in active_providers:
+            # Falls noch andere Offline-Provider da waeren, Ollama an den Anfang
+            if active_providers[0] != "ollama":
+                active_providers.remove("ollama")
+                active_providers.insert(0, "ollama")
+
         last_error = None
         backoff_schedule = [2, 4, 8]
         
