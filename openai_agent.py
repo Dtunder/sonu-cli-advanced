@@ -20,9 +20,12 @@ class OpenAICompatibleAgent:
         if not prov_info:
             raise ValueError(f"Provider {provider_name} unbekannt.")
 
-        api_key = os.getenv(prov_info["env_var"])
-        if not api_key:
-            raise ValueError(f"Kein API-Key fuer {provider_name} in .env ({prov_info['env_var']}) gefunden.")
+        if prov_info["env_var"] is not None:
+            api_key = os.getenv(prov_info["env_var"])
+            if not api_key:
+                raise ValueError(f"Kein API-Key fuer {provider_name} in .env ({prov_info['env_var']}) gefunden.")
+        else:
+            api_key = "dummy-key-for-local"
 
         headers = {}
         if provider_name == "openrouter":
