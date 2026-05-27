@@ -357,7 +357,7 @@ class SonuClient:
         import socket
         try:
             # Versuche, eine Verbindung zu einem zuverlaessigen Server herzustellen
-            socket.create_connection(("1.1.1.1", 53), timeout=2)
+            socket.create_connection(("1.1.1.1", 53), timeout=0.2)
             return True
         except OSError:
             pass
