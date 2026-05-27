@@ -244,7 +244,10 @@ def main():
                     with ui.show_spinner("Initialisiere Google Jules im Hintergrund..."):
                         try:
                             script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jules_delegator.py")
-                            jcmd = f"python \"{script_path}\" \"{prompt_text}\""
+                            if os.name == 'nt':
+                                jcmd = f"& \"{sys.executable}\" \"{script_path}\" \"{prompt_text}\""
+                            else:
+                                jcmd = f"\"{sys.executable}\" \"{script_path}\" \"{prompt_text}\""
                             tid = client.process_mgr.start_task(jcmd)
                             ui.show_info(
                                 f"Google Jules erfolgreich im Hintergrund delegiert (Task-ID [bold yellow]{tid}[/bold yellow]).\n"

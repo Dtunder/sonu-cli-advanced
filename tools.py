@@ -7,6 +7,7 @@ eine Bestaetigung durch den Aufrufer.
 """
 
 import os
+import sys
 import subprocess
 from google.genai import types
 
@@ -129,10 +130,15 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 
 def run_shell(command: str) -> str:
-    """Fuehrt einen Befehl in PowerShell aus (Windows-Standardshell des Nutzers)."""
+    """Fuehrt einen Befehl in der OS-spezifischen Shell aus (PowerShell auf Windows, sh auf Linux/Mac)."""
     try:
+        if os.name == 'nt':
+            cmd_list = ["powershell", "-NoProfile", "-Command", command]
+        else:
+            cmd_list = ["sh", "-c", command]
+
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", command],
+            cmd_list,
             capture_output=True,
             text=True,
             timeout=120,
@@ -209,7 +215,10 @@ def delegate_to_jules(prompt: str) -> str:
     try:
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(curr_dir, "jules_delegator.py")
-        cmd = f"python \"{script_path}\" \"{prompt}\""
+        if os.name == 'nt':
+            cmd = f"& \"{sys.executable}\" \"{script_path}\" \"{prompt}\""
+        else:
+            cmd = f"\"{sys.executable}\" \"{script_path}\" \"{prompt}\""
         tid = _process_manager.start_task(cmd)
         return f"OK: Google Jules Delegierung im Hintergrund gestartet (Task-ID {tid}). Nutze read_background_task_output, um den Fortschritt zu sehen."
     except Exception as e:
@@ -441,8 +450,8 @@ REGISTRY = {
         "safe": False,
         "declaration": types.FunctionDeclaration(
             name="run_shell",
-            description="Fuehrt einen PowerShell-Befehl aus und gibt Exit-Code, stdout und stderr zurueck.",
-            parameters=_schema({"command": _str("Der auszufuehrende PowerShell-Befehl.")}, ["command"]),
+            description="Fuehrt einen Shell-Befehl aus (PowerShell auf Windows, sh auf Linux) und gibt Exit-Code, stdout und stderr zurueck.",
+            parameters=_schema({"command": _str("Der auszufuehrende Shell-Befehl.")}, ["command"]),
         ),
     },
     "start_background_task": {
@@ -450,8 +459,8 @@ REGISTRY = {
         "safe": False,
         "declaration": types.FunctionDeclaration(
             name="start_background_task",
-            description="Startet einen PowerShell-Befehl asynchron im Hintergrund, ohne die REPL zu blockieren.",
-            parameters=_schema({"command": _str("Der im Hintergrund auszufuehrende PowerShell-Befehl.")}, ["command"]),
+            description="Startet einen Shell-Befehl asynchron im Hintergrund, ohne die REPL zu blockieren.",
+            parameters=_schema({"command": _str("Der im Hintergrund auszufuehrende Shell-Befehl.")}, ["command"]),
         ),
     },
     "list_background_tasks": {

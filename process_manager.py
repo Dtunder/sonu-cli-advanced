@@ -12,7 +12,7 @@ class ProcessManager:
         os.makedirs(self.logs_dir, exist_ok=True)
 
     def start_task(self, command):
-        """Startet einen PowerShell-Befehl asynchron im Hintergrund."""
+        """Startet einen Shell-Befehl asynchron im Hintergrund (PowerShell auf Windows, sh auf Linux)."""
         self.task_counter += 1
         task_id = self.task_counter
         log_path = os.path.join(self.logs_dir, f"task_{task_id}.log")
@@ -20,9 +20,14 @@ class ProcessManager:
         # Logdatei oeffnen und Handle sichern
         log_file = open(log_path, "w", encoding="utf-8", errors="replace")
         
+        if os.name == 'nt':
+            cmd_list = ["powershell", "-Command", command]
+        else:
+            cmd_list = ["sh", "-c", command]
+
         # subprocess starten
         proc = subprocess.Popen(
-            ["powershell", "-Command", command],
+            cmd_list,
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,
