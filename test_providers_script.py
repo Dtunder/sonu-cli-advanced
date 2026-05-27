@@ -30,7 +30,7 @@ class MockUI(TerminalUI):
         safe_msg = text.encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding)
         print(f"[RESPONSE] {safe_msg}")
 
-def test_provider(client, ui, name):
+def run_test_provider(client, ui, name):
     print(f"\n==========================================")
     print(f"TESTE PROVIDER: {name}")
     print(f"==========================================")
@@ -67,25 +67,25 @@ def main():
     
     # Teste Groq
     if os.getenv("GROQ_API_KEY"):
-        results["groq"] = test_provider(client, ui, "groq")
+        results["groq"] = run_test_provider(client, ui, "groq")
     else:
         print("GROQ_API_KEY fehlt in .env, ueberspringe.")
         
     # Teste xAI (Grok)
     if os.getenv("XAI_API_KEY"):
-        results["xai"] = test_provider(client, ui, "xai")
+        results["xai"] = run_test_provider(client, ui, "xai")
     else:
         print("XAI_API_KEY fehlt in .env, ueberspringe.")
         
     # Teste OpenRouter
     if os.getenv("OPENROUTER_API_KEY"):
-        results["openrouter"] = test_provider(client, ui, "openrouter")
+        results["openrouter"] = run_test_provider(client, ui, "openrouter")
     else:
         print("OPENROUTER_API_KEY fehlt in .env, ueberspringe.")
         
     # Teste Hugging Face
     if os.getenv("HF_TOKEN"):
-        results["huggingface"] = test_provider(client, ui, "huggingface")
+        results["huggingface"] = run_test_provider(client, ui, "huggingface")
     else:
         print("HF_TOKEN fehlt in .env, ueberspringe.")
 

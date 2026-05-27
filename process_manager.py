@@ -22,7 +22,7 @@ class ProcessManager:
         
         # subprocess starten
         proc = subprocess.Popen(
-            ["powershell", "-Command", command],
+            ["powershell", "-Command", command] if os.name == 'nt' else ["sh", "-c", command],
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,

@@ -209,7 +209,7 @@ def delegate_to_jules(prompt: str) -> str:
     try:
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(curr_dir, "jules_delegator.py")
-        cmd = f"python \"{script_path}\" \"{prompt}\""
+        cmd = f"\"{__import__('sys').executable}\" \"{script_path}\" \"{prompt}\""
         tid = _process_manager.start_task(cmd)
         return f"OK: Google Jules Delegierung im Hintergrund gestartet (Task-ID {tid}). Nutze read_background_task_output, um den Fortschritt zu sehen."
     except Exception as e:
