@@ -7,7 +7,13 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from prompt_toolkit import prompt
+import os as _os
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.formatted_text import HTML
+
 from sonu_client import SonuClient
 from storage import StorageManager
 from terminal_ui import TerminalUI
@@ -49,11 +55,35 @@ def main():
             ui.show_error(f"Fehler bei der autonomen Ausführung: {str(e)}")
             sys.exit(1)
 
+    # Setup prompt session
+    import os
+    history_file = os.path.join(os.path.expanduser("~"), ".sonu_history")
+
+    is_multiline = False
+
+    def bottom_toolbar():
+        yolo_str = "🔥 AN" if ui.yolo else "aus"
+        multiline_str = "AN (Esc+Enter)" if is_multiline else "aus"
+        return HTML(f"<b> Provider:</b> {client.provider} | <b>Model:</b> {client.model_name} | <b>YOLO:</b> {yolo_str} | <b>Multiline:</b> {multiline_str}")
+
+    try:
+        session = PromptSession(
+            history=FileHistory(history_file),
+            auto_suggest=AutoSuggestFromHistory(),
+            bottom_toolbar=bottom_toolbar,
+        )
+    except Exception as e:
+        session = None
+        ui.show_error(f"PromptSession konnte nicht gestartet werden, Fallback auf Standard-Input: {e}")
+
     while True:
         try:
-            # Eingabe über prompt_toolkit
-            user_input = prompt("\nDu: ")
-            
+            if session and sys.stdin.isatty():
+                user_input = session.prompt("\nDu: ", multiline=is_multiline)
+            else:
+                import builtins
+                user_input = builtins.input("\nDu: ")
+
             # Entferne führende/folgende Leerzeichen
             cmd = user_input.strip()
             
@@ -69,6 +99,12 @@ def main():
                 ui.show_help()
                 continue
                 
+            elif cmd == "/multiline":
+                is_multiline = not is_multiline
+                status = "aktiviert (Esc + Enter zum Absenden)" if is_multiline else "deaktiviert"
+                ui.show_info(f"Multiline-Modus {status}")
+                continue
+
             elif cmd == "/models":
                 with ui.show_spinner("Lade verfügbare Modelle..."):
                     try:
