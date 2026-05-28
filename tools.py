@@ -325,6 +325,14 @@ def create_github_pull_request(title: str, body: str) -> str:
         return f"FEHLER bei Pull-Request-Erstellung: {e}"
 
 
+def get_todos() -> str:
+    """Gibt die Liste der Todos zurueck."""
+    return read_file("todos.md")
+
+def write_todos(content: str) -> str:
+    """Schreibt/Ueberschreibt die Todos."""
+    return write_file("todos.md", content)
+
 # ---------------------------------------------------------------------------
 # Registry: name -> dict(func, declaration, safe)
 # 'safe' = read-only, laeuft ohne Bestaetigung.
@@ -506,6 +514,24 @@ REGISTRY = {
                 "task_description": _str("Detaillierte Anweisung und Ziel fuer den Sub-Agenten."),
                 "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten.")
             }, ["task_description"]),
+        ),
+    },
+    "get_todos": {
+        "func": get_todos,
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="get_todos",
+            description="Liest aktuelle Todos aus. Nur auf explizite Anfrage des Nutzers aufrufen",
+            parameters=_schema({}, []),
+        ),
+    },
+    "write_todos": {
+        "func": write_todos,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="write_todos",
+            description="Schreibt neue Todos in die Liste. Nur auf explizite Anfrage des Nutzers aufrufen",
+            parameters=_schema({"content": _str("Vollstaendiger Inhalt der Todos, der geschrieben werden soll.")}, ["content"]),
         ),
     },
 }
