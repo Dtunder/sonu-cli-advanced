@@ -1,580 +1,688 @@
-"""Agent-Werkzeuge fuer Sonu CLI: Datei- und Shell-Operationen mit Schema-Deklarationen.
+"""Agent-Werkzeuge fuer Sonu CLI: Die volle Power von Gemini CLI + Sonu Custom Addons.
 
-Jedes Tool gibt einen String zurueck (Erfolg ODER lesbare Fehlermeldung), damit das
-Modell aus Fehlern lernen und sich selbst korrigieren kann. Read-only-Tools sind als
-sicher markiert und laufen ohne Rueckfrage; schreibende/ausfuehrende Tools verlangen
-eine Bestaetigung durch den Aufrufer.
+Jedes Tool gibt einen String zurueck (Erfolg ODER lesbare Fehlermeldung).
+Read-only-Tools sind als sicher markiert; schreibende/ausfuehrende Tools verlangen
+eine Bestaetigung (ausser im YOLO-Modus).
 """
 
 import os
 import subprocess
-from google.genai import types
+import glob
+import re
+import time
+import concurrent.futures
 
-# Maximale Ausgabelaenge, die wir ans Modell zurueckgeben (Token-Schutz).
+class LazyTypesProxy:
+    def __getattr__(self, name):
+        from google.genai import types
+        return getattr(types, name)
+types = LazyTypesProxy()
+
 _MAX_OUTPUT = 20000
-
 
 def _truncate(text: str) -> str:
     if len(text) > _MAX_OUTPUT:
         return text[:_MAX_OUTPUT] + f"\n\n[... gekuerzt, {len(text) - _MAX_OUTPUT} Zeichen weggelassen ...]"
     return text
 
+# --- DATEI OPERATIONEN ---
 
-def read_file(path: str) -> str:
+def read_file(path: str, start_line: int = None, end_line: int = None) -> str:
+    """Liest den Inhalt einer Textdatei. Unterstuetzt chirurgische Reads."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
+            if start_line is not None or end_line is not None:
+                lines = f.readlines()
+                start = (start_line - 1) if start_line else 0
+                end = end_line if end_line else len(lines)
+                content = "".join(lines[start:end])
+                return _truncate(content) if content else "(Kein Inhalt im Bereich)"
             content = f.read()
-        return _truncate(content) if content else "(Datei ist leer)"
-    except FileNotFoundError:
-        return f"FEHLER: Datei nicht gefunden: {path}"
-    except IsADirectoryError:
-        return f"FEHLER: '{path}' ist ein Verzeichnis, keine Datei. Nutze list_dir."
+        return _truncate(content) if content else "(Datei leer)"
     except Exception as e:
         return f"FEHLER beim Lesen von '{path}': {e}"
 
-
 def list_dir(path: str = ".") -> str:
+    """Listet Dateien und Verzeichnisse auf."""
     try:
         entries = sorted(os.listdir(path))
-        if not entries:
-            return f"(Verzeichnis '{path}' ist leer)"
         lines = []
         for name in entries:
             full = os.path.join(path, name)
             marker = "[DIR] " if os.path.isdir(full) else "      "
-            size = ""
-            if os.path.isfile(full):
-                try:
-                    size = f"  ({os.path.getsize(full)} B)"
-                except OSError:
-                    size = ""
-            lines.append(f"{marker}{name}{size}")
+            lines.append(f"{marker}{name}")
         return _truncate("\n".join(lines))
-    except FileNotFoundError:
-        return f"FEHLER: Verzeichnis nicht gefunden: {path}"
     except Exception as e:
-        return f"FEHLER beim Auflisten von '{path}': {e}"
+        return f"FEHLER: {e}"
 
+def glob_files(pattern: str, path: str = ".") -> str:
+    """Findet Dateien via Glob-Pattern (z.B. '**/*.py')."""
+    try:
+        files = glob.glob(os.path.join(path, pattern), recursive=True)
+        if not files: return "Keine Treffer."
+        files.sort(key=lambda x: os.path.getmtime(x) if os.path.isfile(x) else 0, reverse=True)
+        return _truncate("\n".join(files[:100]))
+    except Exception as e:
+        return f"FEHLER: {e}"
 
-def search_files(pattern: str, path: str = ".") -> str:
-    """Sucht 'pattern' (Teilstring, case-insensitive) in allen Textdateien unter 'path'."""
-    import fnmatch
+def grep_search(pattern: str, path: str = ".", context: int = 0) -> str:
+    """Sucht Regex in Dateien mit Kontextzeilen. Nutzt ripgrep wenn verfügbar (10-50x schneller)."""
+    # Try ripgrep first
+    try:
+        rg_args = ["rg", "--line-number", "--no-heading", "--color=never", "--max-count=200"]
+        if context > 0:
+            rg_args += ["-C", str(context)]
+        rg_args += [pattern, path]
+        result = subprocess.run(rg_args, capture_output=True, text=True, timeout=30)
+        if result.returncode in (0, 1):  # 0=matches, 1=no matches
+            out = result.stdout.strip()
+            return _truncate(out) if out else "Keine Treffer."
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # rg not available, fall through to Python impl
+
+    # Python fallback
     matches = []
-    needle = pattern.lower()
-    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+    try: regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e: return f"Ungueltiger Regex: {e}"
+
+    skip = {".git", "__pycache__", "node_modules", "venv"}
     try:
         for root, dirs, files in os.walk(path):
-            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            dirs[:] = [d for d in dirs if d not in skip]
             for fname in files:
                 fpath = os.path.join(root, fname)
                 try:
                     with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                        for lineno, line in enumerate(f, 1):
-                            if needle in line.lower():
-                                matches.append(f"{fpath}:{lineno}: {line.strip()[:200]}")
-                                if len(matches) >= 200:
-                                    matches.append("[... weitere Treffer abgeschnitten ...]")
-                                    return _truncate("\n".join(matches))
-                except (OSError, UnicodeError):
-                    continue
-        if not matches:
-            return f"Keine Treffer fuer '{pattern}' unter '{path}'."
-        return _truncate("\n".join(matches))
-    except Exception as e:
-        return f"FEHLER bei der Suche: {e}"
+                        lines = f.readlines()
+                        for i, line in enumerate(lines):
+                            if regex.search(line):
+                                s, e = max(0, i-context), min(len(lines), i+context+1)
+                                match_block = [f"{j+1:4}: {'>> ' if j==i else '   '}{lines[j].strip()[:200]}" for j in range(s, e)]
+                                matches.append(f"--- {fpath} ---\n" + "\n".join(match_block))
+                                if len(matches) >= 50: return _truncate("\n\n".join(matches) + "\n[Limit erreicht]")
+                except: continue
+        return _truncate("\n\n".join(matches)) if matches else "Keine Treffer."
+    except Exception as e: return f"FEHLER: {e}"
+
+def _show_diff(old_lines: list, new_lines: list, path: str) -> str:
+    """Gibt einen farbigen unified diff als String zurück."""
+    import difflib
+    diff = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", lineterm=""))
+    if not diff:
+        return ""
+    lines = []
+    for line in diff[:80]:  # max 80 Zeilen zeigen
+        if line.startswith("+++") or line.startswith("---"):
+            lines.append(f"\033[1m{line}\033[0m")
+        elif line.startswith("+"):
+            lines.append(f"\033[32m{line}\033[0m")
+        elif line.startswith("-"):
+            lines.append(f"\033[31m{line}\033[0m")
+        elif line.startswith("@@"):
+            lines.append(f"\033[36m{line}\033[0m")
+        else:
+            lines.append(line)
+    if len(diff) > 80:
+        lines.append(f"\033[33m... +{len(diff)-80} weitere Zeilen ...\033[0m")
+    return "\n".join(lines)
+
+
+def _confirm_edit(path: str, diff_str: str) -> bool:
+    """Zeigt Diff und fragt nach Bestätigung. Gibt True zurück bei yolo oder y/j."""
+    import __main__
+    ui = getattr(__main__, "ui", None)
+    if ui and getattr(ui, "yolo", False):
+        return True
+    print(f"\n\033[1mDiff für {path}:\033[0m")
+    print(diff_str)
+    try:
+        ans = input("\n  Apply? [y/N]: ").strip().lower()
+        return ans in ("y", "yes", "j", "ja")
+    except (EOFError, KeyboardInterrupt):
+        return False
 
 
 def write_file(path: str, content: str) -> str:
+    """Schreibt/Ueberschreibt eine Datei. Zeigt Diff und fragt nach Bestätigung."""
     try:
-        parent = os.path.dirname(os.path.abspath(path))
-        if parent and not os.path.exists(parent):
-            os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"OK: {len(content)} Zeichen nach '{path}' geschrieben."
-    except Exception as e:
-        return f"FEHLER beim Schreiben von '{path}': {e}"
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        old_lines = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    old_lines = f.readlines()
+            except Exception:
+                pass
+        new_lines = content.splitlines(keepends=True)
+        diff_str = _show_diff(old_lines, new_lines, path)
+        if diff_str:
+            if not _confirm_edit(path, diff_str):
+                return "ABGEBROCHEN: Nutzer hat Änderung abgelehnt."
+        with open(path, "w", encoding="utf-8") as f: f.write(content)
+        return f"OK: {len(content)} Bytes geschrieben."
+    except Exception as e: return f"FEHLER: {e}"
 
-
-def edit_file(path: str, old_string: str, new_string: str) -> str:
-    """Ersetzt 'old_string' durch 'new_string' in einer Datei (chirurgischer Edit).
-
-    'old_string' muss exakt EINMAL vorkommen, sonst wird abgebrochen, damit nicht
-    versehentlich die falsche Stelle geaendert wird.
-    """
+def replace(path: str, old_string: str, new_string: str) -> str:
+    """Ersetzt Textstelle chirurgisch. Zeigt Diff und fragt nach Bestätigung."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except FileNotFoundError:
-        return f"FEHLER: Datei nicht gefunden: {path}. Nutze write_file, um sie neu anzulegen."
-    except Exception as e:
-        return f"FEHLER beim Lesen von '{path}': {e}"
+        with open(path, "r", encoding="utf-8") as f: content = f.read()
+    except Exception as e: return f"FEHLER beim Lesen: {e}"
 
     count = content.count(old_string)
-    if count == 0:
-        return f"FEHLER: Der zu ersetzende Text wurde in '{path}' nicht gefunden."
-    if count > 1:
-        return (
-            f"FEHLER: Der zu ersetzende Text kommt {count}x in '{path}' vor. "
-            "Gib mehr Kontext an, damit die Stelle eindeutig ist."
-        )
+    if count == 0: return "FEHLER: 'old_string' nicht gefunden."
+    if count > 1: return f"FEHLER: {count} Treffer. Sei praeziser."
 
     new_content = content.replace(old_string, new_string)
+    old_lines = content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    diff_str = _show_diff(old_lines, new_lines, path)
+    if diff_str:
+        if not _confirm_edit(path, diff_str):
+            return "ABGEBROCHEN: Nutzer hat Änderung abgelehnt."
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        return f"OK: 1 Stelle in '{path}' ersetzt ({len(old_string)} -> {len(new_string)} Zeichen)."
-    except Exception as e:
-        return f"FEHLER beim Schreiben von '{path}': {e}"
+        with open(path, "w", encoding="utf-8") as f: f.write(new_content)
+        return "OK: 1 Stelle ersetzt."
+    except Exception as e: return f"FEHLER beim Schreiben: {e}"
 
+# --- SYSTEM & TOOLS ---
 
-def run_shell(command: str) -> str:
-    """Fuehrt einen Befehl in PowerShell aus (Windows-Standardshell des Nutzers)."""
+def run_shell(command: str, stream: bool = False, timeout: int = 600) -> str:
+    """Fuehrt PowerShell-Befehl aus. stream=True gibt Output live im Terminal aus. timeout in Sekunden (default 600)."""
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             ["powershell", "-NoProfile", "-Command", command],
-            capture_output=True,
-            text=True,
-            timeout=120,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace"
         )
-        out = result.stdout or ""
-        err = result.stderr or ""
-        combined = ""
-        if out:
-            combined += out
-        if err:
-            combined += ("\n[stderr]\n" + err) if combined else ("[stderr]\n" + err)
-        combined = combined.strip() or "(kein Output)"
-        return _truncate(f"[exit {result.returncode}]\n{combined}")
-    except subprocess.TimeoutExpired:
-        return "FEHLER: Befehl hat das Zeitlimit von 120s ueberschritten."
-    except Exception as e:
-        return f"FEHLER bei der Ausfuehrung: {e}"
-
-
-_process_manager = None
-
-def set_process_manager(pm):
-    global _process_manager
-    _process_manager = pm
-
-def start_background_task(command: str) -> str:
-    """Startet einen PowerShell-Befehl asynchron im Hintergrund (keine Blockade des CLIs)."""
-    if not _process_manager:
-        return "FEHLER: ProcessManager nicht initialisiert."
-    try:
-        tid = _process_manager.start_task(command)
-        return f"OK: Hintergrundprozess gestartet mit Task-ID {tid}."
-    except Exception as e:
-        return f"FEHLER beim Starten des Hintergrundprozesses: {e}"
-
-def list_background_tasks() -> str:
-    """Listet alle aktiven und kuerzlich beendeten Hintergrund-Tasks auf."""
-    if not _process_manager:
-        return "FEHLER: ProcessManager nicht initialisiert."
-    try:
-        tasks = _process_manager.list_tasks()
-        if not tasks:
-            return "(Keine Hintergrundprozesse aktiv)"
         lines = []
-        for t in tasks:
-            lines.append(f"Task-ID {t['id']}: '{t['command']}' - Status: {t['status']} (Laufzeit: {t['elapsed']})")
-        return "\n".join(lines)
+        if stream:
+            import sys
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                lines.append(line)
+            proc.wait(timeout=timeout)
+        else:
+            try:
+                out, _ = proc.communicate(timeout=timeout)
+                lines = [out]
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                return f"FEHLER: Timeout nach {timeout}s"
+        full = "".join(lines).strip()
+        return _truncate(f"[exit {proc.returncode}]\n{full or '(kein Output)'}")
     except Exception as e:
-        return f"FEHLER beim Auflisten der Hintergrundprozesse: {e}"
+        return f"FEHLER: {e}"
 
-def read_background_task_output(task_id: int, tail_lines: int = 25) -> str:
-    """Liest den kuerzlichen Output (stdout/stderr) eines Hintergrund-Tasks aus."""
-    if not _process_manager:
-        return "FEHLER: ProcessManager nicht initialisiert."
+# --- WEB & SUCHE ---
+
+def web_fetch(url: str) -> str:
+    """Ruft eine Webseite ab und extrahiert den Text."""
+    import requests
+    from bs4 import BeautifulSoup
     try:
-        return _process_manager.read_task_output(task_id, tail_lines)
-    except Exception as e:
-        return f"FEHLER beim Lesen der Task-Ausgabe: {e}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
+        for s in soup(["script", "style"]): s.decompose()
+        text = soup.get_text(separator=' ', strip=True)
+        return _truncate(text)
+    except Exception as e: return f"FEHLER beim Web-Fetch: {e}"
 
-def kill_background_task(task_id: int) -> str:
-    """Beendet einen aktiven Hintergrundprozess gewaltsam."""
-    if not _process_manager:
-        return "FEHLER: ProcessManager nicht initialisiert."
+def google_search(query: str) -> str:
+    """Sucht im Web via DuckDuckGo (Gemini CLI Ersatz)."""
+    from duckduckgo_search import DDGS
     try:
-        _process_manager.kill_task(task_id)
-        return f"OK: Task {task_id} wurde beendet."
-    except Exception as e:
-        return f"FEHLER beim Beenden des Tasks {task_id}: {e}"
+        with DDGS() as ddgs:
+            results = [f"{r['title']}: {r['body']} ({r['href']})" for r in ddgs.text(query, max_results=5)]
+        return "\n\n".join(results) if results else "Keine Ergebnisse."
+    except Exception as e: return f"FEHLER bei Suche: {e}"
 
-def delegate_to_jules(prompt: str) -> str:
-    """Delegiert eine komplexe, repo-weite Coding-Aufgabe headless an Google Jules im Hintergrund."""
-    if not _process_manager:
-        return "FEHLER: ProcessManager nicht initialisiert."
+# --- ORCHESTRIERUNG ---
+
+def update_topic(title: str, summary: str, strategic_intent: str = None) -> str:
+    """Aktualisiert Kapitel-Status im UI."""
     try:
-        curr_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(curr_dir, "jules_delegator.py")
-        cmd = f"python \"{script_path}\" \"{prompt}\""
-        tid = _process_manager.start_task(cmd)
-        return f"OK: Google Jules Delegierung im Hintergrund gestartet (Task-ID {tid}). Nutze read_background_task_output, um den Fortschritt zu sehen."
-    except Exception as e:
-        return f"FEHLER beim Starten der Jules-Delegierung: {e}"
+        import __main__
+        if hasattr(__main__, 'ui'):
+            __main__.ui.show_topic(title, summary, strategic_intent)
+            return "Topic aktualisiert."
+    except: pass
+    return "OK"
 
-def delegate_to_subagent(task_description: str, provider: str = None) -> str:
-    """Delegiert eine isolierte Teilaufgabe an einen autonomen Sub-Agenten (headless)."""
+def read_many_files(include: list, exclude: list = None, recursive: bool = True) -> str:
+    """Liest mehrere Dateien via Glob-Pattern und gibt alle Inhalte konkateniert zurück.
+    Portiert von Gemini CLI ReadManyFilesTool."""
+    import fnmatch
+    exclude = exclude or []
+    DEFAULT_EXCLUDES = ["node_modules/**", ".git/**", "__pycache__/**", "*.pyc", "dist/**", "build/**", ".venv/**"]
+    all_excludes = DEFAULT_EXCLUDES + exclude
+    cwd = os.getcwd()
+    matched = set()
+    for pattern in include:
+        try:
+            found = glob.glob(os.path.join(cwd, pattern), recursive=recursive)
+            for f in found:
+                if os.path.isfile(f):
+                    rel = os.path.relpath(f, cwd).replace("\\", "/")
+                    skip = any(fnmatch.fnmatch(rel, ex.rstrip("/**") + "*") or fnmatch.fnmatch(rel, ex) for ex in all_excludes)
+                    if not skip:
+                        matched.add(f)
+        except Exception:
+            pass
+    if not matched:
+        return "Keine Dateien gefunden."
+    parts = []
+    skipped = []
+    for fpath in sorted(matched):
+        rel = os.path.relpath(fpath, cwd).replace("\\", "/")
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            if len(content) > 50000:
+                content = content[:50000] + "\n[... gekürzt ...]"
+            parts.append(f"--- {fpath} ---\n\n{content}\n\n")
+        except Exception as e:
+            skipped.append(f"{rel} ({e})")
+    result = "".join(parts)
+    if skipped:
+        result += f"\n\nÜbersprungen: {', '.join(skipped)}"
+    return _truncate(result)
+
+
+# Session-Todo-Liste (in-memory, wird bei /clear resettet)
+_todos: list = []
+
+def write_todos(todos: list) -> str:
+    """Setzt die komplette Todo-Liste. Portiert von Gemini CLI WriteTodosTool.
+    todos: Liste von {description: str, status: pending|in_progress|completed|cancelled|blocked}"""
+    global _todos
+    VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled", "blocked"}
+    if not isinstance(todos, list):
+        return "FEHLER: todos muss eine Liste sein."
+    in_progress = sum(1 for t in todos if t.get("status") == "in_progress")
+    if in_progress > 1:
+        return "FEHLER: Nur eine Aufgabe kann gleichzeitig 'in_progress' sein."
+    for t in todos:
+        if not isinstance(t, dict) or not t.get("description", "").strip():
+            return "FEHLER: Jedes Todo braucht eine 'description'."
+        if t.get("status") not in VALID_STATUSES:
+            return f"FEHLER: Ungültiger Status '{t.get('status')}'. Erlaubt: {', '.join(VALID_STATUSES)}"
+    _todos = todos
+    if not todos:
+        return "Todo-Liste geleert."
+    lines = [f"{i+1}. [{t['status']}] {t['description']}" for i, t in enumerate(todos)]
+    return "Todo-Liste aktualisiert:\n" + "\n".join(lines)
+
+
+def get_todos() -> str:
+    """Zeigt die aktuelle Todo-Liste."""
+    if not _todos:
+        return "Todo-Liste ist leer."
+    lines = [f"{i+1}. [{t['status']}] {t['description']}" for i, t in enumerate(_todos)]
+    return "\n".join(lines)
+
+
+def list_background_processes() -> str:
+    """Listet alle Hintergrundprozesse der aktuellen Session.
+    Portiert von Gemini CLI ListBackgroundProcessesTool."""
+    try:
+        import __main__
+        client = getattr(__main__, 'client', None)
+        if client and hasattr(client, 'process_mgr'):
+            tasks = client.process_mgr.list_tasks()
+            if not tasks:
+                return "Keine Hintergrundprozesse aktiv."
+            lines = [f"- [PID {t.get('id','?')}] {t.get('status','?').upper()}: `{t.get('command','?')}`" for t in tasks]
+            return "\n".join(lines)
+    except Exception:
+        pass
+    return "Keine Hintergrundprozesse gefunden."
+
+
+def read_background_output(pid: int, lines: int = 100) -> str:
+    """Liest den Output-Log eines Hintergrundprozesses.
+    Portiert von Gemini CLI ReadBackgroundOutputTool."""
+    try:
+        import __main__
+        client = getattr(__main__, 'client', None)
+        if client and hasattr(client, 'process_mgr'):
+            output = ""
+            for chunk in client.process_mgr.watch_task_output(pid):
+                output += chunk
+                if len(output) > 64 * 1024:
+                    break
+            if not output:
+                return f"Kein Output für Prozess {pid}."
+            tail = output.strip().split("\n")
+            return "\n".join(tail[-lines:])
+    except Exception as e:
+        return f"FEHLER beim Lesen von Prozess {pid}: {e}"
+    return f"Prozess {pid} nicht gefunden."
+
+
+def ask_user(question: str) -> str:
+    """Fragt Nutzer nach Information (Interaktiv)."""
+    return f"FRAGE: {question}"
+
+def delegate_to_subagent(agent_name: str, prompt: str) -> str:
+    """Delegiert an einen Spezial-Agenten (Investigator, Generalist, Architect)."""
     try:
         from sonu_client import SonuClient
         import terminal_ui
-        import providers
         
-        # Headless UI mock
         class HeadlessUI(terminal_ui.TerminalUI):
-            def __init__(self):
-                super().__init__()
-                self.yolo = True # Immer durchlaufen ohne zu fragen
-                self.log = []
-                
-            def show_spinner(self, message="..."):
-                class DummyContext:
-                    def __enter__(self): pass
-                    def __exit__(self, *args): pass
-                return DummyContext()
-                
-            def display_response(self, text): self.log.append(f"Ergebnis: {text}")
-            def display_stream(self, stream): return ""
-            def show_error(self, err): self.log.append(f"Fehler: {err}")
-            def show_info(self, info): self.log.append(f"Info: {info}")
-            def show_agent_thought(self, text): pass
-            def show_tool_call(self, name, args): self.log.append(f"-> Sub-Agent fuehrt '{name}' aus...")
-            def show_tool_result(self, name, result, rejected=False): pass
-            def confirm_action(self, name, args): return True
+            def __init__(self): super().__init__(); self.yolo=True; self.log=[]
+            def display_response(self, text): self.log.append(text)
+            def show_tool_call(self, n, a): self.log.append(f"Tool: {n}")
+            def confirm_action(self, n, a): return True
 
-        ui = HeadlessUI()
         client = SonuClient()
-        
-        # Override provider if specified
-        if provider and providers.get_provider(provider):
-            client.set_provider(provider)
-            
-        ui.log.append(f"=== Starte autonomen Sub-Agenten (Provider: {client.provider}) ===")
-        
-        final_answer = client.run_agent_turn(f"SUB-AGENT TASK: {task_description}\nErledige dies autonom. Verwende deine Werkzeuge (lies Dateien, suche, etc). Antworte am Ende mit einer ausfuehrlichen, endgueltigen Zusammenfassung deiner Ergebnisse und Analysen.", ui, max_steps=15)
-        
-        summary = "\n".join(ui.log)
-        return f"--- Sub-Agent Execution Log ---\n{summary}\n\n--- Sub-Agent Final Answer ---\n{final_answer}"
-    except Exception as e:
-        return f"FEHLER bei Sub-Agenten-Delegierung: {e}"
+        ui = HeadlessUI()
+        ui.log.append(f"=== SUB-AGENT: {agent_name} ===")
+        ans = client.run_agent_turn(prompt, ui, max_steps=15)
+        return f"--- SUB-AGENT LOG ---\n" + "\n".join(ui.log) + f"\n\n--- FINALES ERGEBNIS ---\n{ans}"
+    except Exception as e: return f"FEHLER: {e}"
 
-
-def create_git_branch(branch_name: str) -> str:
-    """Erstellt einen neuen Git-Branch und wechselt in diesen."""
+def run_python(code: str) -> str:
+    """Führt Python-Code aus und gibt stdout/stderr zurück. Ideal für Berechnungen, Datenanalyse und schnelle Tests."""
+    import sys
+    import io
+    import traceback
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
     try:
-        subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
-        result = subprocess.run(
-            ["git", "checkout", "-b", branch_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return f"OK: Branch '{branch_name}' erstellt und ausgecheckt."
-        return f"FEHLER: Konnte Branch nicht erstellen.\n{result.stderr.strip()}"
-    except subprocess.CalledProcessError:
-        return "FEHLER: Nicht in einem Git-Repository."
-    except Exception as e:
-        return f"FEHLER bei Git-Branch-Erstellung: {e}"
+        exec(compile(code, "<sonu>", "exec"), {})
+        out = sys.stdout.getvalue()
+        err = sys.stderr.getvalue()
+        result = out
+        if err:
+            result += f"\n[stderr]\n{err}"
+        return _truncate(result.strip()) if result.strip() else "(kein Output)"
+    except Exception:
+        err = sys.stderr.getvalue()
+        tb = traceback.format_exc()
+        return f"FEHLER:\n{err}\n{tb}"
+    finally:
+        sys.stdout, sys.stderr = old_stdout, old_stderr
 
-def commit_git_changes(message: str) -> str:
-    """Fuegt alle Aenderungen hinzu und committet sie."""
+
+def edit_many(edits_json: str) -> str:
+    """Wendet mehrere chirurgische Edits auf verschiedene Dateien in einer Aktion an.
+    edits_json: JSON-Array von {path, old_string, new_string} Objekten.
+    Alle Edits werden zuerst validiert, dann erst angewendet (atomic).
+    """
+    import json as _json
     try:
-        subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", "."], check=True, capture_output=True, text=True)
-        result = subprocess.run(
-            ["git", "commit", "-m", message],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return f"OK: Aenderungen committet mit Nachricht '{message}'.\n{result.stdout.strip()}"
-        elif "nothing to commit" in result.stdout:
-            return "OK: Keine Aenderungen zu committen."
-        return f"FEHLER beim Committen.\nstdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
-    except subprocess.CalledProcessError as e:
-        if e.cmd[1] == "add":
-            return f"FEHLER beim Hinzufuegen der Dateien: {e.stderr}"
-        return "FEHLER: Nicht in einem Git-Repository."
+        edits = _json.loads(edits_json)
     except Exception as e:
-        return f"FEHLER beim Committen: {e}"
+        return f"FEHLER: Ungültiges JSON: {e}"
 
-def create_github_pull_request(title: str, body: str) -> str:
-    """Erstellt einen Pull Request via GitHub CLI (gh)."""
+    if not isinstance(edits, list) or not edits:
+        return "FEHLER: edits_json muss ein nicht-leeres Array sein."
+
+    # Validierungsphase
+    validated = []
+    for i, edit in enumerate(edits):
+        path = edit.get("path", "")
+        old_str = edit.get("old_string", "")
+        new_str = edit.get("new_string", "")
+        if not path:
+            return f"FEHLER: Edit #{i+1} hat keinen 'path'."
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            return f"FEHLER: Datei '{path}' nicht lesbar: {e}"
+        count = content.count(old_str)
+        if count == 0:
+            return f"FEHLER: Edit #{i+1} '{path}': 'old_string' nicht gefunden."
+        if count > 1:
+            return f"FEHLER: Edit #{i+1} '{path}': {count} Treffer. Sei präziser."
+        validated.append((path, content, old_str, new_str))
+
+    # Diff-Preview
+    import difflib
+    diff_lines = []
+    for path, content, old_str, new_str in validated:
+        new_content = content.replace(old_str, new_str)
+        old_lines = content.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+        diff = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", lineterm=""))
+        diff_lines.extend(diff[:30])
+
+    if diff_lines:
+        colored = []
+        for line in diff_lines:
+            if line.startswith("+") and not line.startswith("+++"):
+                colored.append(f"\033[32m{line}\033[0m")
+            elif line.startswith("-") and not line.startswith("---"):
+                colored.append(f"\033[31m{line}\033[0m")
+            elif line.startswith("@@"):
+                colored.append(f"\033[36m{line}\033[0m")
+            else:
+                colored.append(line)
+        print(f"\n\033[1mBatch-Edit: {len(validated)} Dateien\033[0m")
+        print("\n".join(colored))
+        import __main__
+        ui = getattr(__main__, "ui", None)
+        if not (ui and getattr(ui, "yolo", False)):
+            try:
+                ans = input(f"\n  Apply all {len(validated)} edits? [y/N]: ").strip().lower()
+                if ans not in ("y", "yes", "j", "ja"):
+                    return "ABGEBROCHEN: Nutzer hat Batch-Edit abgelehnt."
+            except (EOFError, KeyboardInterrupt):
+                return "ABGEBROCHEN."
+
+    # Anwenden
+    results = []
+    for path, content, old_str, new_str in validated:
+        new_content = content.replace(old_str, new_str)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            results.append(f"OK: {path}")
+        except Exception as e:
+            results.append(f"FEHLER {path}: {e}")
+    return "\n".join(results)
+
+
+def patch_file(path: str, patch: str) -> str:
+    """Wendet einen unified-diff Patch auf eine Datei an. Patch-Format: --- a/file +++ b/file @@ ... @@"""
     try:
-        formatted_body = f"""# {title}
+        import difflib
+        with open(path, "r", encoding="utf-8") as f:
+            original = f.readlines()
 
-## Description
-{body}
+        # Parse unified diff
+        result_lines = list(original)
+        patch_lines = patch.splitlines(keepends=True)
+        hunks = []
+        i = 0
+        while i < len(patch_lines):
+            line = patch_lines[i]
+            if line.startswith("@@"):
+                # parse @@ -start,count +start,count @@
+                import re
+                m = re.search(r"-(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))?", line)
+                if m:
+                    old_start = int(m.group(1)) - 1
+                    old_count = int(m.group(2)) if m.group(2) else 1
+                    hunks.append({"old_start": old_start, "old_count": old_count, "lines": []})
+            elif hunks and (line.startswith("+") or line.startswith("-") or line.startswith(" ")):
+                hunks[-1]["lines"].append(line)
+            i += 1
 
----
-*Created automatically by Sonu CLI*
-"""
-        result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", formatted_body],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return f"OK: Pull Request erfolgreich erstellt.\nURL: {result.stdout.strip()}"
-        return f"FEHLER beim Erstellen des Pull Requests.\n{result.stderr.strip()}"
-    except FileNotFoundError:
-         return "FEHLER: GitHub CLI (gh) ist nicht installiert oder nicht im PATH."
+        if not hunks:
+            return "FEHLER: Kein gültiger unified-diff Hunk gefunden."
+
+        # Apply hunks in reverse order to preserve line numbers
+        for hunk in reversed(hunks):
+            old_start = hunk["old_start"]
+            removes = [l[1:] for l in hunk["lines"] if l.startswith("-")]
+            adds = [l[1:] for l in hunk["lines"] if l.startswith("+")]
+            old_count = len(removes)
+            result_lines[old_start:old_start + old_count] = adds
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(result_lines)
+        return f"OK: Patch auf {path} angewendet ({len(hunks)} Hunk(s))."
     except Exception as e:
-        return f"FEHLER bei Pull-Request-Erstellung: {e}"
+        return f"FEHLER beim Patchen: {e}"
 
 
-# ---------------------------------------------------------------------------
-# Registry: name -> dict(func, declaration, safe)
-# 'safe' = read-only, laeuft ohne Bestaetigung.
-# ---------------------------------------------------------------------------
+# --- ERWEITERTER DATEI-SUPPORT ---
 
-def _schema(props: dict, required: list) -> types.Schema:
-    return types.Schema(type=types.Type.OBJECT, properties=props, required=required)
+def read_pdf(path: str, pages: str = None) -> str:
+    """Liest Text aus einer PDF-Datei. pages z.B. '1-5' oder '3'."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            total = len(pdf.pages)
+            if pages:
+                parts = pages.split("-")
+                start = int(parts[0]) - 1
+                end = int(parts[1]) if len(parts) > 1 else int(parts[0])
+                page_range = pdf.pages[start:end]
+            else:
+                page_range = pdf.pages[:20]  # max 20 pages default
+            text_parts = []
+            for i, page in enumerate(page_range):
+                t = page.extract_text() or ""
+                text_parts.append(f"--- Seite {i+1} ---\n{t}")
+            result = "\n\n".join(text_parts)
+            if not pages and total > 20:
+                result += f"\n\n[{total - 20} weitere Seiten. Nutze pages='1-{total}' für den Rest.]"
+            return _truncate(result) if result.strip() else "(Kein Text extrahierbar)"
+    except ImportError:
+        return "FEHLER: pdfplumber nicht installiert. Führe aus: pip install pdfplumber"
+    except Exception as e:
+        return f"FEHLER beim Lesen der PDF: {e}"
 
 
-def _str(desc: str) -> types.Schema:
-    return types.Schema(type=types.Type.STRING, description=desc)
+def read_image(path: str, question: str = "Was ist auf diesem Bild zu sehen?") -> str:
+    """Analysiert ein Bild via Gemini Vision. Kann Screenshots, Diagramme, UI-Mockups beschreiben."""
+    try:
+        with open(path, "rb") as f:
+            img_bytes = f.read()
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                    "gif": "image/gif", "webp": "image/webp"}
+        mime = mime_map.get(ext, "image/png")
+
+        from google import genai as _genai
+        from google.genai import types as _types
+        import __main__
+        client_obj = getattr(__main__, "client", None)
+        api_key = None
+        if client_obj:
+            api_key = client_obj.keys[client_obj.active_index] if client_obj.keys else client_obj.api_key
+        if not api_key:
+            from dotenv import dotenv_values
+            env = dotenv_values(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+            api_key = env.get("GEMINI_API_KEY") or (env.get("GEMINI_KEY_POOL", "").split(",")[0].strip())
+        if not api_key:
+            return "FEHLER: Kein Gemini API-Key gefunden."
+
+        vision_client = _genai.Client(api_key=api_key)
+        response = vision_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[question, _types.Part.from_bytes(data=img_bytes, mime_type=mime)]
+        )
+        return _truncate(response.text or "(Keine Antwort)")
+    except Exception as e:
+        return f"FEHLER bei Bildanalyse: {e}"
 
 
-REGISTRY = {
-    "create_git_branch": {
-        "func": create_git_branch,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="create_git_branch",
-            description="Erstellt einen neuen Git-Branch und wechselt dorthin.",
-            parameters=_schema({"branch_name": _str("Name des neuen Branches")}, ["branch_name"]),
-        ),
-    },
-    "commit_git_changes": {
-        "func": commit_git_changes,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="commit_git_changes",
-            description="Fuegt alle Aenderungen ('git add .') hinzu und committet sie mit der angegebenen Nachricht.",
-            parameters=_schema({"message": _str("Die Commit-Nachricht")}, ["message"]),
-        ),
-    },
-    "create_github_pull_request": {
-        "func": create_github_pull_request,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="create_github_pull_request",
-            description="Erstellt einen Pull Request auf GitHub mittels 'gh' CLI.",
-            parameters=_schema(
-                {
-                    "title": _str("Titel des Pull Requests"),
-                    "body": _str("Inhalt/Beschreibung des Pull Requests (wird als Markdown formatiert)")
-                },
-                ["title", "body"]
-            ),
-        ),
-    },
-    "read_file": {
-        "func": read_file,
-        "safe": True,
-        "declaration": types.FunctionDeclaration(
-            name="read_file",
-            description="Liest den vollstaendigen Inhalt einer Textdatei und gibt ihn zurueck.",
-            parameters=_schema({"path": _str("Pfad zur Datei, relativ oder absolut.")}, ["path"]),
-        ),
-    },
-    "list_dir": {
-        "func": list_dir,
-        "safe": True,
-        "declaration": types.FunctionDeclaration(
-            name="list_dir",
-            description="Listet Dateien und Unterordner eines Verzeichnisses auf.",
-            parameters=_schema({"path": _str("Verzeichnispfad. Standard: aktuelles Verzeichnis '.'.")}, []),
-        ),
-    },
-    "search_files": {
-        "func": search_files,
-        "safe": True,
-        "declaration": types.FunctionDeclaration(
-            name="search_files",
-            description="Durchsucht alle Textdateien unter einem Pfad nach einem Teilstring (case-insensitive) und gibt Datei:Zeile:Inhalt zurueck.",
-            parameters=_schema(
-                {
-                    "pattern": _str("Zu suchender Text."),
-                    "path": _str("Startverzeichnis der Suche. Standard '.'."),
-                },
-                ["pattern"],
-            ),
-        ),
-    },
-    "write_file": {
-        "func": write_file,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="write_file",
-            description="Schreibt Inhalt in eine Datei (ueberschreibt vorhandene). Legt fehlende Ordner an.",
-            parameters=_schema(
-                {
-                    "path": _str("Zielpfad der Datei."),
-                    "content": _str("Vollstaendiger Inhalt, der geschrieben werden soll."),
-                },
-                ["path", "content"],
-            ),
-        ),
-    },
-    "edit_file": {
-        "func": edit_file,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="edit_file",
-            description="Ersetzt eine eindeutige Textstelle in einer bestehenden Datei (chirurgischer Edit). Bevorzugt gegenueber write_file, wenn nur ein Teil geaendert werden soll.",
-            parameters=_schema(
-                {
-                    "path": _str("Pfad zur zu bearbeitenden Datei."),
-                    "old_string": _str("Exakter, eindeutiger Text, der ersetzt werden soll (inkl. Einrueckung)."),
-                    "new_string": _str("Der neue Text, der an die Stelle tritt."),
-                },
-                ["path", "old_string", "new_string"],
-            ),
-        ),
-    },
-    "run_shell": {
-        "func": run_shell,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="run_shell",
-            description="Fuehrt einen PowerShell-Befehl aus und gibt Exit-Code, stdout und stderr zurueck.",
-            parameters=_schema({"command": _str("Der auszufuehrende PowerShell-Befehl.")}, ["command"]),
-        ),
-    },
-    "start_background_task": {
-        "func": start_background_task,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="start_background_task",
-            description="Startet einen PowerShell-Befehl asynchron im Hintergrund, ohne die REPL zu blockieren.",
-            parameters=_schema({"command": _str("Der im Hintergrund auszufuehrende PowerShell-Befehl.")}, ["command"]),
-        ),
-    },
-    "list_background_tasks": {
-        "func": list_background_tasks,
-        "safe": True,
-        "declaration": types.FunctionDeclaration(
-            name="list_background_tasks",
-            description="Listet alle laufenden und kuerzlich beendeten asynchronen Hintergrundprozesse auf.",
-            parameters=_schema({}, []),
-        ),
-    },
-    "read_background_task_output": {
-        "func": read_background_task_output,
-        "safe": True,
-        "declaration": types.FunctionDeclaration(
-            name="read_background_task_output",
-            description="Liest die Ausgaben (stdout/stderr) eines bestimmten Hintergrund-Tasks.",
-            parameters=_schema(
-                {
-                    "task_id": types.Schema(type=types.Type.INTEGER, description="ID des Tasks."),
-                    "tail_lines": types.Schema(type=types.Type.INTEGER, description="Anzahl der Zeilen vom Ende des Logs (Standard: 25)."),
-                },
-                ["task_id"],
-            ),
-        ),
-    },
-    "kill_background_task": {
-        "func": kill_background_task,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="kill_background_task",
-            description="Beendet einen laufenden Hintergrund-Task gewaltsam.",
-            parameters=_schema({"task_id": types.Schema(type=types.Type.INTEGER, description="ID des zu beendenden Tasks.")}, ["task_id"]),
-        ),
-    },
-    "delegate_to_jules": {
-        "func": delegate_to_jules,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="delegate_to_jules",
-            description="Delegiert eine komplexe Programmieraufgabe an Google Jules headless im Hintergrund. Polle danach den Output, um die Fertigstellung zu ueberwachen.",
-            parameters=_schema({"prompt": _str("Detaillierter Prompt der Aufgabe fuer Google Jules.")}, ["prompt"]),
-        ),
-    },
-    "delegate_to_subagent": {
-        "func": delegate_to_subagent,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="delegate_to_subagent",
-            description="Delegiert eine Recherche, Analyse oder Coding-Teilaufgabe an einen isolierten, autonomen Sonu-Subagenten. Verhindert, dass dein eigener Kontext ueberflutet wird. Gib ihm eine SEHR ausfuehrliche Anweisung.",
-            parameters=_schema({
-                "task_description": _str("Detaillierte Anweisung und Ziel fuer den Sub-Agenten."),
-                "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten.")
-            }, ["task_description"]),
-        ),
-    },
+def notebook_read(path: str) -> str:
+    """Liest ein Jupyter Notebook (.ipynb) und gibt alle Zellen mit Outputs zurück."""
+    try:
+        import json as _json
+        with open(path, "r", encoding="utf-8") as f:
+            nb = _json.load(f)
+        cells = nb.get("cells", [])
+        parts = []
+        for i, cell in enumerate(cells):
+            cell_type = cell.get("cell_type", "unknown")
+            source = "".join(cell.get("source", []))
+            header = f"## Cell {i+1} [{cell_type}]"
+            parts.append(f"{header}\n{source}")
+            if cell_type == "code":
+                outputs = cell.get("outputs", [])
+                out_texts = []
+                for o in outputs:
+                    if "text" in o:
+                        out_texts.append("".join(o["text"]))
+                    elif "data" in o and "text/plain" in o["data"]:
+                        out_texts.append("".join(o["data"]["text/plain"]))
+                if out_texts:
+                    parts.append("Output:\n" + "\n".join(out_texts))
+        return _truncate("\n\n".join(parts)) if parts else "(Notebook leer)"
+    except Exception as e:
+        return f"FEHLER beim Lesen des Notebooks: {e}"
+
+
+# --- REGISTRY & SCHEMAS ---
+
+def _schema(props, required): return types.Schema(type=types.Type.OBJECT, properties=props, required=required)
+def _str(d): return types.Schema(type=types.Type.STRING, description=d)
+def _int(d): return types.Schema(type=types.Type.INTEGER, description=d)
+
+_REG = {
+    "read_file": {"f": read_file, "s": True, "d": "Liest Datei. Nutze start_line/end_line.", "p": {"path": "Pfad", "start_line": "Start (int)", "end_line": "Ende (int)"}, "r": ["path"]},
+    "list_dir": {"f": list_dir, "s": True, "d": "Listet Verzeichnis auf.", "p": {"path": "Pfad"}, "r": []},
+    "glob_files": {"f": glob_files, "s": True, "d": "Findet Dateien via Glob-Muster.", "p": {"pattern": "Muster", "path": "Startpfad"}, "r": ["pattern"]},
+    "grep_search": {"f": grep_search, "s": True, "d": "Regex-Suche mit Kontextzeilen.", "p": {"pattern": "Regex", "path": "Pfad", "context": "Anzahl Zeilen (int)"}, "r": ["pattern"]},
+    "replace": {"f": replace, "s": False, "d": "Surgical edit: ersetzt EINE Textstelle.", "p": {"path": "Pfad", "old_string": "Alt", "new_string": "Neu"}, "r": ["path", "old_string", "new_string"]},
+    "write_file": {"f": write_file, "s": False, "d": "Schreibt Datei komplett neu.", "p": {"path": "Pfad", "content": "Inhalt"}, "r": ["path", "content"]},
+    "run_shell": {"f": run_shell, "s": False, "d": "Fuehrt PowerShell-Befehl aus. Fuer lange Befehle mit Live-Output: stream=true setzen.", "p": {"command": "Befehl", "stream": "true fuer Live-Streaming des Outputs"}, "r": ["command"]},
+    "web_fetch": {"f": web_fetch, "s": True, "d": "Extrahiert Text von einer URL.", "p": {"url": "URL"}, "r": ["url"]},
+    "google_search": {"f": google_search, "s": True, "d": "Sucht im Internet.", "p": {"query": "Suchbegriff"}, "r": ["query"]},
+    "update_topic": {"f": update_topic, "s": True, "d": "Aktualisiert Kapitel im UI.", "p": {"title": "Titel", "summary": "Inhalt", "strategic_intent": "Ziel"}, "r": ["title", "summary"]},
+    "ask_user": {"f": ask_user, "s": False, "d": "Fragt Nutzer nach Feedback.", "p": {"question": "Frage"}, "r": ["question"]},
+    "delegate_to_subagent": {"f": delegate_to_subagent, "s": False, "d": "Delegiert an Sub-Agenten.", "p": {"agent_name": "investigator|generalist|architect", "prompt": "Aufgabe"}, "r": ["agent_name", "prompt"]},
+    "run_python": {"f": run_python, "s": True, "d": "Führt Python-Code aus. Für Berechnungen, Datenanalyse, schnelle Tests. Kein Filesystem-Zugriff nötig.", "p": {"code": "Python-Code als String"}, "r": ["code"]},
+    "patch_file": {"f": patch_file, "s": False, "d": "Wendet unified-diff Patch auf Datei an. Besser als replace bei mehreren Änderungen.", "p": {"path": "Dateipfad", "patch": "unified-diff Patch"}, "r": ["path", "patch"]},
+    "edit_many": {"f": edit_many, "s": False, "d": "Batch-Edit: Mehrere chirurgische Edits auf verschiedene Dateien in EINER Aktion. edits_json: JSON-Array von {path, old_string, new_string}. Atomar: zuerst alle validieren, dann alle anwenden.", "p": {"edits_json": "JSON-Array von {path, old_string, new_string} Objekten"}, "r": ["edits_json"]},
+    "read_pdf": {"f": read_pdf, "s": True, "d": "Liest Text aus einer PDF-Datei. pages z.B. '1-5' oder '3'. Max 20 Seiten ohne pages.", "p": {"path": "Pfad zur PDF-Datei", "pages": "Seitenbereich z.B. '1-5'"}, "r": ["path"]},
+    "read_image": {"f": read_image, "s": True, "d": "Analysiert Bild via Gemini Vision: Screenshots, Diagramme, UI-Mockups, Code-Fotos.", "p": {"path": "Pfad zur Bilddatei (jpg/png/gif/webp)", "question": "Was soll analysiert werden?"}, "r": ["path"]},
+    "notebook_read": {"f": notebook_read, "s": True, "d": "Liest Jupyter Notebook (.ipynb): alle Zellen und Outputs.", "p": {"path": "Pfad zum .ipynb Notebook"}, "r": ["path"]},
+    "read_many_files": {"f": read_many_files, "s": True, "d": "Liest mehrere Dateien via Glob-Pattern gleichzeitig und gibt alle Inhalte konkateniert zurück. Ideal für schnelle Codebase-Übersicht.", "p": {"include": "Liste von Glob-Patterns z.B. ['src/**/*.py', 'README.md']", "exclude": "Optionale Ausschluss-Patterns", "recursive": "Rekursiv suchen (bool, default true)"}, "r": ["include"]},
+    "write_todos": {"f": write_todos, "s": True, "d": "Setzt die komplette Todo-Liste für die aktuelle Aufgabe. status: pending|in_progress|completed|cancelled|blocked. Max 1 in_progress.", "p": {"todos": "Liste von {description: str, status: str} Objekten"}, "r": ["todos"]},
+    "get_todos": {"f": get_todos, "s": True, "d": "Zeigt die aktuelle Todo-Liste.", "p": {}, "r": []},
+    "list_background_processes": {"f": list_background_processes, "s": True, "d": "Listet alle aktiven Hintergrundprozesse der Session.", "p": {}, "r": []},
+    "read_background_output": {"f": read_background_output, "s": True, "d": "Liest den Output-Log eines Hintergrundprozesses.", "p": {"pid": "Prozess-ID (int)", "lines": "Anzahl letzter Zeilen (int, default 100)"}, "r": ["pid"]},
 }
 
+def get_tool_object():
+    decls = []
+    for name, i in _REG.items():
+        props = {k: _int(v) if "(int)" in v else _str(v) for k, v in i["p"].items()}
+        decls.append(types.FunctionDeclaration(name=name, description=i["d"], parameters=_schema(props, i["r"])))
+    return types.Tool(function_declarations=decls)
 
-def get_tool_object() -> types.Tool:
-    """Baut das types.Tool mit allen Funktionsdeklarationen fuer die GenerateContentConfig."""
-    return types.Tool(function_declarations=[t["declaration"] for t in REGISTRY.values()])
+def is_safe(name): return _REG.get(name, {}).get("s", False)
 
-
-def _type_to_str(t) -> str:
-    """google-genai types.Type (Enum oder String) -> JSON-Schema-Typ-String."""
-    if t is None:
-        return "string"
-    name = getattr(t, "name", None) or str(t)
-    return name.split(".")[-1].lower()
-
-
-def _schema_to_json(schema) -> dict:
-    """Konvertiert ein google-genai types.Schema rekursiv in ein OpenAI/JSON-Schema-Dict."""
-    if schema is None:
-        return {"type": "object", "properties": {}}
-    out = {"type": _type_to_str(getattr(schema, "type", None))}
-    desc = getattr(schema, "description", None)
-    if desc:
-        out["description"] = desc
-    props = getattr(schema, "properties", None)
-    if props:
-        out["properties"] = {k: _schema_to_json(v) for k, v in props.items()}
-    required = getattr(schema, "required", None)
-    if required:
-        out["required"] = list(required)
-    items = getattr(schema, "items", None)
-    if items is not None:
-        out["items"] = _schema_to_json(items)
-    if out["type"] == "object" and "properties" not in out:
-        out["properties"] = {}
-    return out
-
-
-def get_openai_tools() -> list:
-    """Baut die Tool-Liste im OpenAI-Function-Calling-Format aus der REGISTRY."""
-    specs = []
-    for entry in REGISTRY.values():
-        decl = entry["declaration"]
-        specs.append({
-            "type": "function",
-            "function": {
-                "name": decl.name,
-                "description": decl.description or "",
-                "parameters": _schema_to_json(getattr(decl, "parameters", None)),
-            },
-        })
-    return specs
-
-
-def is_safe(name: str) -> bool:
-    entry = REGISTRY.get(name)
-    return bool(entry and entry["safe"])
-
-
-def dispatch(name: str, args: dict) -> str:
-    """Fuehrt das benannte Tool mit den gegebenen Argumenten aus."""
-    entry = REGISTRY.get(name)
-    if not entry:
-        return f"FEHLER: Unbekanntes Tool '{name}'."
+def dispatch(name, args):
+    if name not in _REG: return f"Unbekannt: {name}"
     try:
-        return entry["func"](**(args or {}))
-    except TypeError as e:
-        return f"FEHLER: Falsche Argumente fuer '{name}': {e}"
-    except Exception as e:
-        return f"FEHLER bei Tool '{name}': {e}"
+        # Konvertiere string booleans ("true"/"false") zu echten booleans
+        clean = {}
+        for k, v in (args or {}).items():
+            if isinstance(v, str) and v.lower() in ("true", "false"):
+                clean[k] = v.lower() == "true"
+            else:
+                clean[k] = v
+        return _REG[name]["f"](**clean)
+    except Exception as e: return f"FEHLER: {e}"
+
+def get_openai_tools():
+    out = []
+    for name, i in _REG.items():
+        props = {k: {"type": "integer" if "(int)" in v else "string", "description": v} for k, v in i["p"].items()}
+        out.append({"type": "function", "function": {
+            "name": name, "description": i["d"],
+            "parameters": {"type": "object", "properties": props, "required": i["r"]}
+        }})
+    return out

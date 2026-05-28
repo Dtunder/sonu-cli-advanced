@@ -1,235 +1,176 @@
+import time
 from rich.console import Console
-from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.table import Table
-from rich.syntax import Syntax
 from rich import box
-from rich.live import Live
 
-# Icons je Tool fuer schnelle visuelle Orientierung.
 _TOOL_ICONS = {
     "read_file": "📖",
     "list_dir": "📂",
-    "search_files": "🔎",
+    "glob_files": "🌐",
+    "grep_search": "🔎",
+    "replace": "🩹",
     "write_file": "✏️",
-    "edit_file": "🩹",
     "run_shell": "⚙️",
+    "web_fetch": "🌐",
+    "google_search": "🔍",
+    "ask_user": "❓",
+    "update_topic": "📖",
+    "delegate_to_subagent": "🤖",
 }
 
 
 class TerminalUI:
     def __init__(self):
         self.console = Console()
-        # YOLO-Mode: wenn True, werden schreibende/ausfuehrende Aktionen ohne
-        # Rueckfrage automatisch ausgefuehrt (voller Zugriff, keine Bremsen).
         self.yolo = False
 
-    def show_welcome(self):
-        welcome_message = (
-            "[bold cyan]Willkommen bei Sonu CLI — deinem autonomen Terminal-Agenten![/bold cyan]\n\n"
-            "Sonu kann jetzt [bold]handeln[/bold], nicht nur reden: Dateien lesen & schreiben,\n"
-            "Verzeichnisse durchsuchen und PowerShell-Befehle ausführen.\n"
-            "Schreibende Aktionen werden dir vor der Ausführung zur Bestätigung vorgelegt.\n\n"
-            "💡 Beschreibe eine Aufgabe in natürlicher Sprache — Sonu wählt die Werkzeuge selbst.\n"
-            "💡 Nutze [yellow]/tools[/yellow] für die Werkzeugliste, [yellow]/help[/yellow] für alle Befehle.\n"
-            "🔥 [red]/yolo[/red] oder Start mit [red]--yolo[/red]: voller Zugriff ohne Rückfragen.\n"
-            "💡 Beende das CLI mit [bold red]/exit[/bold red] oder [bold red]exit[/bold red]."
-        )
-        self.console.print(Panel(
-            welcome_message,
-            title="✨ Sonu CLI",
-            title_align="left",
-            border_style="magenta",
-            expand=False,
-            box=box.ROUNDED
-        ))
+    def show_agent_status(self, action_description):
+        self.console.print(f"[dim]  {action_description}[/dim]")
 
-    def show_spinner(self, message="Sonu denkt nach..."):
-        """Gibt ein Context-Manager Objekt für den Spinner zurück."""
-        return self.console.status(f"[bold yellow]{message}[/bold yellow]", spinner="dots")
+    def show_welcome(self):
+        self.console.print()
+        self.console.print("[bold cyan]Sonu CLI[/bold cyan]  [dim]gemini-2.5-flash · multi-provider · 15 keys[/dim]")
+        self.console.print("[dim]/help für Befehle · /yolo für Auto-Approve · Strg+C zum Beenden[/dim]")
+        self.console.print("[dim]" + "─" * 50 + "[/dim]")
+        self.console.print()
+
+    def show_spinner(self, message="Lade..."):
+        """Context manager für kurze blocking ops (z.B. /models laden)."""
+        return self.console.status(f"[dim]{message}[/dim]", spinner="dots")
+
+    def start_thinking(self, message="Denke nach..."):
+        clean = message.replace("[yellow]", "").replace("[/yellow]", "").replace("[dim]", "").replace("[/dim]", "")
+        self.console.print(f"[dim]⠋ {clean}[/dim]")
+
+    def update_status(self, message):
+        clean = message.replace("[yellow]", "").replace("[/yellow]", "").replace("[dim]", "").replace("[/dim]", "")
+        self.console.print(f"[dim]  {clean}[/dim]")
+
+    def stop_thinking(self):
+        pass  # kein persistenter spinner — nichts zu stoppen
+
+    def _pause_thinking(self):
+        pass
+
+    def _resume_thinking(self):
+        pass
 
     def display_response(self, text):
-        self.console.print("\n[bold magenta]✦ Sonu:[/bold magenta]")
-        md = Markdown(text)
-        self.console.print(md)
-        self.console.print("\n" + "[dim]" + "-" * 50 + "[/dim]" + "\n")
+        self.console.print()
+        self.console.print("[bold magenta]Sonu[/bold magenta]")
+        self.console.print(Markdown(text))
+        self.console.print()
 
     def display_stream(self, response_stream):
-        """Zeigt die Antwort von Sonu live als gerendertes Markdown im Terminal an."""
-        self.console.print("\n[bold magenta]✦ Sonu:[/bold magenta]")
+        from rich.live import Live
+        self.console.print()
+        self.console.print("[bold magenta]Sonu[/bold magenta]")
         full_text = ""
         try:
-            with Live(Markdown(full_text), console=self.console, refresh_per_second=15, transient=False) as live:
+            with Live(Markdown(""), console=self.console, refresh_per_second=15, transient=False) as live:
                 for chunk in response_stream:
-                    if chunk.text:
+                    if hasattr(chunk, "text") and chunk.text:
                         full_text += chunk.text
                         live.update(Markdown(full_text))
         except Exception as e:
-            self.console.print(f"\n[bold red]Fehler beim Streamen:[/bold red] {str(e)}")
-            
-        self.console.print("\n" + "[dim]" + "-" * 50 + "[/dim]" + "\n")
+            self.console.print(f"[bold red]Error:[/bold red] {str(e)}")
+        self.console.print()
         return full_text
 
     def show_error(self, error_message):
-        self.console.print(Panel(
-            f"[bold red]Fehler:[/bold red] {error_message}",
-            title="⚠️ Systemfehler",
-            title_align="left",
-            border_style="red",
-            expand=False,
-            box=box.ROUNDED
-        ))
+        self.console.print(f"\n[bold red]✗ {error_message}[/bold red]\n")
 
     def show_info(self, info_message):
-        self.console.print(f"\n[bold green]✓[/bold green] {info_message}\n")
+        self.console.print(f"[green]✓[/green] {info_message}")
 
-    # --- Agent-spezifische Anzeige ------------------------------------------------
-
-    def show_agent_thought(self, text):
-        """Zeigt Zwischentext des Agenten (Plan/Begruendung), bevor Tools laufen."""
-        self.console.print(f"\n[italic dim]🤔 {text}[/italic dim]\n")
-
-    def _format_args(self, name, args):
-        if name == "run_shell":
-            return args.get("command", "")
-        if name == "write_file":
-            content = args.get("content", "")
-            preview = content if len(content) <= 600 else content[:600] + "\n[... gekuerzt ...]"
-            return f"Datei: {args.get('path', '?')}\n\n{preview}"
-        if name == "edit_file":
-            old = args.get("old_string", "")
-            new = args.get("new_string", "")
-            old_p = old if len(old) <= 300 else old[:300] + " [...]"
-            new_p = new if len(new) <= 300 else new[:300] + " [...]"
-            return f"Datei: {args.get('path', '?')}\n\n[- alt]\n{old_p}\n\n[+ neu]\n{new_p}"
-        # read_file / list_dir / search_files: kompakte Key=Value-Darstellung.
-        return ", ".join(f"{k}={v!r}" for k, v in args.items())
+    def show_topic(self, title, summary, strategic_intent=None):
+        self.console.print(f"\n[bold cyan]📖 {title}[/bold cyan]")
+        self.console.print(f"[dim]{summary}[/dim]")
+        if strategic_intent:
+            self.console.print(f"[dim italic]Intent: {strategic_intent}[/dim italic]")
+        self.console.print()
 
     def show_tool_call(self, name, args):
         icon = _TOOL_ICONS.get(name, "🔧")
-        body = self._format_args(name, args)
-        if name == "run_shell":
-            renderable = Syntax(body, "powershell", theme="ansi_dark", word_wrap=True)
-        else:
-            renderable = body
-        self.console.print(Panel(
-            renderable,
-            title=f"{icon} Tool-Aufruf: [bold]{name}[/bold]",
-            title_align="left",
-            border_style="cyan",
-            expand=False,
-            box=box.ROUNDED,
-        ))
+        arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        if len(arg_str) > 100:
+            arg_str = arg_str[:97] + "..."
+        self._tool_start_time = time.monotonic()
+        self.console.print(f"[dim]{icon} [bold]{name}[/bold]({arg_str})[/dim]", end="")
 
     def show_tool_result(self, name, result, rejected=False):
-        style = "red" if rejected else "green"
-        text = result if len(result) <= 1500 else result[:1500] + "\n[... gekuerzt ...]"
-        self.console.print(Panel(
-            f"[dim]{text}[/dim]",
-            title=f"↳ Ergebnis: {name}",
-            title_align="left",
-            border_style=style,
-            expand=False,
-            box=box.ROUNDED,
-        ))
+        elapsed = time.monotonic() - getattr(self, "_tool_start_time", time.monotonic())
+        duration = f"[dim] {elapsed*1000:.0f}ms[/dim]"
+        if rejected:
+            self.console.print(f"\r[dim]{_TOOL_ICONS.get(name,'🔧')} [bold]{name}[/bold][/dim] [red]✗ abgelehnt[/red]{duration}")
+        else:
+            lines = (result or "").count("\n") + 1 if result else 0
+            hint = f"[dim] ({lines} Zeilen)[/dim]" if lines > 1 else ""
+            self.console.print(f" [dim]✓[/dim]{hint}{duration}")
 
     def confirm_action(self, name, args):
-        """Fragt den Nutzer vor schreibenden/ausfuehrenden Aktionen. Standard = Nein.
-        Im YOLO-Mode wird ohne Rueckfrage automatisch zugestimmt (nur sichtbar geloggt).
-        """
-        icon = _TOOL_ICONS.get(name, "🔧")
         if self.yolo:
-            self.console.print(
-                f"[bold red]🔥 YOLO[/bold red] [dim]auto-approve:[/dim] [bold]{name}[/bold]"
-            )
+            self.console.print(f"[bold red]YOLO[/bold red] [dim]auto-approve:[/dim] {name}")
             return True
         from prompt_toolkit import prompt as _prompt
-        self.console.print(
-            f"\n[bold yellow]{icon} Bestaetigung noetig:[/bold yellow] "
-            f"Der Agent moechte [bold]{name}[/bold] ausfuehren."
-        )
+        self.console.print(f"\n[bold yellow]⚠ Bestätigung:[/bold yellow] [bold]{name}[/bold]?")
         try:
-            answer = _prompt("   Ausfuehren? [y/N]: ").strip().lower()
+            answer = _prompt("  [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
         return answer in ("y", "yes", "j", "ja")
 
+    def prompt_user(self, text):
+        from prompt_toolkit import prompt as _prompt
+        self.console.print(f"\n[bold cyan]? {text}[/bold cyan]")
+        try:
+            return _prompt("   > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
     def set_yolo(self, enabled: bool):
-        """Schaltet den YOLO-Mode um und zeigt das Banner bzw. eine Bestaetigung."""
         self.yolo = enabled
         if enabled:
-            self.show_yolo_banner()
+            self.console.print("\n[bold red]YOLO-MODE AKTIVIERT[/bold red] [dim](keine Rückfragen)[/dim]\n")
         else:
-            self.console.print("\n[bold green]✓ YOLO-Mode deaktiviert.[/bold green] "
-                               "Schreibende Aktionen werden wieder bestaetigt.\n")
-
-    def show_yolo_banner(self):
-        self.console.print(Panel(
-            "[bold red]🔥 YOLO-MODE AKTIV — VOLLER ZUGRIFF, KEINE RUECKFRAGEN 🔥[/bold red]\n\n"
-            "Sonu fuehrt [bold]write_file, edit_file und run_shell ohne Bestaetigung[/bold] aus.\n"
-            "Das schliesst potenziell destruktive Befehle ein (z.B. Loeschen, Ueberschreiben).\n"
-            "Nutze das nur in einem Verzeichnis/Kontext, dem du vertraust.\n\n"
-            "[dim]Mit [yellow]/yolo[/yellow] wieder ausschalten.[/dim]",
-            title="⚠️  YOLO",
-            title_align="left",
-            border_style="red",
-            expand=False,
-            box=box.DOUBLE,
-        ))
+            self.console.print("\n[green]✓ YOLO-Mode deaktiviert.[/green]\n")
 
     def show_help(self):
-        table = Table(
-            title="Verfügbare Befehle",
-            title_style="bold cyan",
-            box=box.ROUNDED,
-            header_style="bold magenta",
-            expand=False
-        )
-        table.add_column("Befehl", style="yellow")
-        table.add_column("Beschreibung", style="white")
-
-        table.add_row("/help", "Zeigt diese Hilfsübersicht an.")
-        table.add_row("/provider", "Zeigt aktiven Provider. Nutze '/provider <name>' zum Wechseln.")
-        table.add_row("/model", "Zeigt das aktuelle Modell an. Nutze '/model <name>', um das Modell zu wechseln.")
-        table.add_row("/models", "Listet alle für dich verfügbaren Sonu-Modelle auf.")
-        table.add_row("/history", "Zeigt den Pfad des aktuellen Logs und die Anzahl der Interaktionen.")
-        table.add_row("/tools", "Listet die Agent-Werkzeuge auf, die Sonu selbststaendig nutzen kann.")
-        table.add_row("/skills", "Listet alle verfügbaren Experten-Skills auf.")
-        table.add_row("/activate <name>", "Aktiviert ein mechatronisches/cybernetisches Experten-Profil.")
-        table.add_row("/deactivate", "Deaktiviert den aktuellen Skill und setzt auf Baseline-Prompt zurück.")
-        table.add_row("/memory", "Zeigt das geladene 4-Ebenen-SONU.md-Gedächtnis.")
-        table.add_row("/tasks / /bg", "Listet alle asynchronen Hintergrundprozesse auf.")
-        table.add_row("/bg output <id>", "Zeigt den aktuellen Log-Output eines Hintergrund-Tasks.")
-        table.add_row("/bg kill <id>", "Beendet einen laufenden Hintergrund-Task gewaltsam.")
-        table.add_row("/delegate <prompt>", "Startet eine headless Google Jules Delegierung im Hintergrund.")
-        table.add_row("/debate <prompt>", "Startet eine Debatte mit Gemini, Groq und OpenRouter.")
-        table.add_row("/exit", "Beendet das CLI sicher.")
-
+        self.console.print("\n[bold cyan]Befehle:[/bold cyan]")
+        table = Table(box=box.MINIMAL, show_header=False, padding=(0, 2))
+        table.add_column("Cmd", style="yellow")
+        table.add_column("Desc", style="dim")
+        cmds = [
+            ("/help", "Hilfe"),
+            ("/status", "Systemstatus"),
+            ("/clear", "Terminal leeren"),
+            ("/exit", "Beenden"),
+            ("/provider [name]", "Backend wechseln"),
+            ("/model [name]", "Modell wechseln"),
+            ("/yolo", "Auto-Approve umschalten"),
+            ("/skills", "Experten-Skills"),
+            ("/keys", "Key-Pool Status"),
+            ("/rotator", "Key-Rotator Status"),
+        ]
+        for c, d in cmds:
+            table.add_row(c, d)
         self.console.print(table)
+        self.console.print()
+
+    def show_status_snapshot(self, provider, model, yolo, active_skill, running_tasks, interaction_count):
+        self.console.print(f"\n[bold cyan]Status[/bold cyan]")
+        self.console.print(f"  Backend   [magenta]{provider}[/magenta]  [dim]{model}[/dim]")
+        self.console.print(f"  Skill     [yellow]{active_skill or 'Baseline'}[/yellow]")
+        self.console.print(f"  YOLO      {'[red]ON[/red]' if yolo else '[green]OFF[/green]'}")
+        self.console.print(f"  Tasks     [cyan]{running_tasks}[/cyan]")
+        self.console.print(f"  Session   {interaction_count} Interaktionen")
+        self.console.print()
 
     def show_tools(self):
-        table = Table(
-            title="Agent-Werkzeuge",
-            title_style="bold cyan",
-            box=box.ROUNDED,
-            header_style="bold magenta",
-            expand=False,
-        )
-        table.add_column("Werkzeug", style="yellow")
-        table.add_column("Funktion", style="white")
-        table.add_column("Sicherheit", style="white")
-        table.add_row("read_file", "Datei lesen", "[green]auto[/green]")
-        table.add_row("list_dir", "Verzeichnis auflisten", "[green]auto[/green]")
-        table.add_row("search_files", "Textsuche ueber Dateien", "[green]auto[/green]")
-        table.add_row("write_file", "Datei schreiben/ueberschreiben", "[yellow]Bestaetigung[/yellow]")
-        table.add_row("edit_file", "Eindeutige Textstelle ersetzen", "[yellow]Bestaetigung[/yellow]")
-        table.add_row("run_shell", "PowerShell-Befehl ausfuehren", "[yellow]Bestaetigung[/yellow]")
-        table.add_row("start_background_task", "PowerShell-Befehl im Hintergrund starten", "[yellow]Bestaetigung[/yellow]")
-        table.add_row("list_background_tasks", "Hintergrund-Tasks auflisten", "[green]auto[/green]")
-        table.add_row("read_background_task_output", "Logs eines Hintergrund-Tasks abrufen", "[green]auto[/green]")
-        table.add_row("kill_background_task", "Hintergrund-Task beenden", "[yellow]Bestaetigung[/yellow]")
-        table.add_row("delegate_to_subagent", "Spawnt autonomen Sub-Agenten fuer Recherche", "[yellow]Bestaetigung[/yellow]")
-        table.add_row("delegate_to_jules", "Headless Jules-Session starten", "[yellow]Bestaetigung[/yellow]")
-        self.console.print(table)
-        status = "[bold red]AN 🔥[/bold red]" if self.yolo else "[green]aus[/green]"
-        self.console.print(f"\nYOLO-Mode: {status}  [dim](umschalten mit /yolo)[/dim]\n")
+        self.console.print("\n[bold cyan]Tools:[/bold cyan]")
+        tool_list = [f"{_TOOL_ICONS.get(k, '🔧')} {k}" for k in _REG_TOOL_NAMES]
+        self.console.print(f"  [dim]{', '.join(tool_list)}[/dim]\n")
+
+
+_REG_TOOL_NAMES = ["read_file", "list_dir", "glob_files", "grep_search", "replace", "write_file", "run_shell", "web_fetch", "google_search", "delegate_to_subagent"]

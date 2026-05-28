@@ -13,7 +13,7 @@ PROVIDERS = {
         "kind": "gemini",
         "env_var": "GEMINI_API_KEY",
         "base_url": None,
-        "default_model": "gemini-3.5-flash",
+        "default_model": "gemini-2.5-flash",
     },
     "groq": {
         "label": "Groq",
@@ -22,20 +22,24 @@ PROVIDERS = {
         "base_url": "https://api.groq.com/openai/v1",
         "default_model": "llama-3.3-70b-versatile",
     },
-    "openrouter": {
-        "label": "OpenRouter",
-        "kind": "openai",
-        "env_var": "OPENROUTER_API_KEY",
-        "base_url": "https://openrouter.ai/api/v1",
-        "default_model": "openai/gpt-4o-mini",
-    },
-    "xai": {
-        "label": "xAI (Grok)",
-        "kind": "openai",
-        "env_var": "XAI_API_KEY",
-        "base_url": "https://api.x.ai/v1",
-        "default_model": "grok-2",
-    },
+    # OpenRouter deaktiviert: Account hat keine Credits (402 bei jedem Request).
+    # Zum Reaktivieren: Credits auf openrouter.ai kaufen, dann einkommentieren.
+    # "openrouter": {
+    #     "label": "OpenRouter",
+    #     "kind": "openai",
+    #     "env_var": "OPENROUTER_API_KEY",
+    #     "base_url": "https://openrouter.ai/api/v1",
+    #     "default_model": "openai/gpt-4o-mini",
+    # },
+    # xAI deaktiviert: Account hat keine Credits (403 bei jedem Request).
+    # Zum Reaktivieren: Credits auf console.x.ai kaufen, dann diesen Block einkommentieren.
+    # "xai": {
+    #     "label": "xAI (Grok)",
+    #     "kind": "openai",
+    #     "env_var": "XAI_API_KEY",
+    #     "base_url": "https://api.x.ai/v1",
+    #     "default_model": "grok-3",
+    # },
     "huggingface": {
         "label": "Hugging Face",
         "kind": "openai",

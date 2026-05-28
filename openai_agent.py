@@ -1,7 +1,5 @@
 import os
 import json
-from openai import OpenAI
-import openai
 
 import tools
 from skills_manager import SkillsManager
@@ -30,9 +28,8 @@ class OpenAICompatibleAgent:
             api_key = "dummy-key-for-local"
 
         headers = {}
-        if provider_name == "openrouter":
-            headers = {"HTTP-Referer": "https://github.com/sonu-cli", "X-Title": "Sonu CLI"}
 
+        from openai import OpenAI
         self.client = OpenAI(
             api_key=api_key,
             base_url=prov_info["base_url"],
@@ -97,6 +94,7 @@ class OpenAICompatibleAgent:
 
     def run_agent_turn(self, user_input, ui, max_steps=25):
         import time
+        import openai
         self.messages.append({"role": "user", "content": user_input})
         
         # Check and compress before starting the loop
@@ -136,12 +134,10 @@ class OpenAICompatibleAgent:
                         latency = (time.time() - start_time) * 1000
                     else:
                         raise e
-            except openai.RateLimitError as e:
-                # Weiterwerfen für Provider-Rotation in sonu_client.py
-                raise Exception(f"Rate Limit / Quota erreicht für {self.provider_name}. Fehler: {e}")
-            except Exception as e:
-                # Alle anderen Fehler ebenfalls weiterwerfen, damit Rotation greifen kann
-                raise e
+            except openai.RateLimitError:
+                raise  # propagate directly — sonu_client._is_rate_limit_error() handles rotation
+            except Exception:
+                raise
             
             prompt_tokens = 0
             completion_tokens = 0

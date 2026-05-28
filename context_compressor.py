@@ -26,10 +26,10 @@ def get_model_limit(model_name: str) -> int:
     return 128_000 # Default fallback
 
 def compress_openai_messages(messages: list, model_name: str, client_or_agent) -> list:
-    """Komprimiert OpenAI-kompatible Nachrichten, falls Limit überschritten."""
+    """Komprimiert OpenAI-kompatible Nachrichten, falls Budget überschritten."""
     limit = get_model_limit(model_name)
-    threshold = int(limit * 0.7)
-    
+    threshold = min(int(limit * 0.7), 30_000)  # Groq hat oft nur 8-128k, knapp halten
+
     total_tokens = 0
     for msg in messages:
         total_tokens += count_tokens(str(msg.get("content", "")))
@@ -92,11 +92,14 @@ def summarize_messages_openai(messages: list, agent) -> str:
     except Exception as e:
         return f"Kontext komprimiert, aber Zusammenfassung schlug fehl: {e}"
 
+# Free-Tier-Schonung: komprimiere aggressiv, damit nicht jeder Turn die
+# Tagesquota (~1M Token/Tag pro Key) auffrisst. Hartes Limit statt 70% von 1M.
+_FREE_TIER_HISTORY_BUDGET = 40_000
+
 def compress_gemini_history(history: list, model_name: str, client) -> list:
-    """Komprimiert Gemini Chat History, falls Limit überschritten."""
-    limit = get_model_limit(model_name)
-    threshold = int(limit * 0.7)
-    
+    """Komprimiert Gemini Chat History, falls Token-Budget überschritten."""
+    threshold = _FREE_TIER_HISTORY_BUDGET
+
     total_tokens = 0
     for content in history:
         for part in content.parts:

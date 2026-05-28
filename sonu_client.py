@@ -1,500 +1,535 @@
+"""
+Sonu CLI — Core Agent Client
+Aufgebaut wie Gemini CLI (turn.ts + geminiChat.ts + retry.ts),
+einziger Unterschied: Key-Rotation über Pool statt single key.
+"""
+
 import os
 import time
-from google import genai
-from google.genai import types
+import json
+
 from dotenv import load_dotenv
 
 
-import providers
-import tools
-from skills_manager import SkillsManager
-from process_manager import ProcessManager
-from memory_manager import MemoryManager
-from multi_provider_client import MultiProviderClient
-from openai_agent import OpenAICompatibleAgent
-from storage import StorageManager
-from context_compressor import compress_gemini_history
+class QuotaExhaustedException(Exception):
+    def __init__(self, model_name, key_count):
+        self.model_name = model_name
+        self.key_count = key_count
+        super().__init__(
+            f"Alle {key_count} API-Keys haben die Tagesquota fuer '{model_name}' erschoepft."
+        )
 
 
-SYSTEM_INSTRUCTION = """Du bist Sonu, ein autonomer Coding- und Recherche-Agent, der direkt im Terminal des Nutzers laeuft.
+# ---------------------------------------------------------------------------
+# Lazy SDK proxies — gleich wie vorher, vermeidet 2s Import beim Start
+# ---------------------------------------------------------------------------
 
-Du hast echte Werkzeuge und handelst damit selbststaendig, statt nur zu reden:
-- read_file(path): Datei lesen
-- list_dir(path): Verzeichnis auflisten
-- search_files(pattern, path): Textsuche ueber Dateien
-- write_file(path, content): Datei schreiben/ueberschreiben
-- edit_file(path, old_string, new_string): eindeutige Textstelle chirurgisch ersetzen (bevorzugt vor write_file fuer Teiländerungen)
-- run_shell(command): PowerShell-Befehl ausfuehren
-- start_background_task(command): PowerShell-Befehl asynchron im Hintergrund ausfuehren
-- list_background_tasks(): Hintergrund-Prozesse auflisten
-- read_background_task_output(task_id): Output eines Tasks ausgeben
-- kill_background_task(task_id): Hintergrundprozess beenden
-- delegate_to_subagent(task_description, provider): Spawnt einen isolierten Sonu-Subagenten fuer Recherche/Code-Aufgaben, um den Haupt-Kontext nicht zu ueberlasten.
-- delegate_to_jules(prompt): Komplexe Aufgabe headless im Hintergrund an Google Jules delegieren
-- activate_skill(name): ein Experten-Skill-Profil aktivieren, das deinen Fokus/Workflow umstellt
+class _LazyGenai:
+    def __getattr__(self, name):
+        from google import genai
+        return getattr(genai, name)
 
-Arbeitsweise:
-- Wenn eine Aufgabe viel Recherche/Dateizugriff erfordert (mehrere Dateien durchsuchen, Code verstehen), nutze ZWINGEND delegate_to_subagent, damit der Subagent das macht und dir nur das Destillat/Ergebnis liefert.
-- Wenn eine Aufgabe nach einem klaren Expertenfokus verlangt (Architektur, Performance, Review, kybernetische Analyse), aktiviere zuerst das passende Skill via activate_skill.
-- Wenn eine Aufgabe Dateizugriff, Befehle oder Delegierungen erfordert, BENUTZE die entsprechenden Werkzeuge. Rate nicht ueber Dateiinhalte.
-- Gehe schrittweise vor: erst erkunden (lesen/listen/suchen), dann handeln (schreiben/ausfuehren/delegieren).
-- Du kannst mehrere Werkzeuge nacheinander aufrufen, bis die Aufgabe geloest ist.
-- Schreibende, ausfuehrende und delegierende Aktionen werden dem Nutzer zur Bestaetigung vorgelegt. Wird etwas abgelehnt, respektiere das und schlage eine Alternative vor.
-- Nutze bevorzugt relative Pfade zum aktuellen Arbeitsverzeichnis.
-- Antworte am Ende knapp auf Deutsch in einem praezisen, mechatronisch-kompetenten Ton und fasse zusammen, was du getan hast.
+class _LazyTypes:
+    def __getattr__(self, name):
+        from google.genai import types
+        return getattr(types, name)
+
+genai = _LazyGenai()
+types = _LazyTypes()
+
+# ---------------------------------------------------------------------------
+# Retry-Logik — portiert von Gemini CLI retry.ts
+# Retryable: 429, 499, 5xx, Netzwerkfehler
+# Terminal:  403 (auth), 400 (bad request), Tages-Quota
+# ---------------------------------------------------------------------------
+
+_RETRYABLE_STATUS = {429, 499, 500, 502, 503, 504}
+_DAILY_QUOTA_PHRASES = ("daily", "per day", "day quota", "exceeded your", "resource_exhausted")
+_AUTH_PHRASES = ("403", "forbidden", "unauthorized", "invalid api key", "api_key_invalid")
+_RATE_PHRASES = ("429", "quota", "rate limit", "resource exhausted", "rateerror")
+
+
+def _is_daily_quota(err: str) -> bool:
+    e = err.lower()
+    return any(p in e for p in _DAILY_QUOTA_PHRASES)
+
+
+def _is_auth_error(err: str) -> bool:
+    e = err.lower()
+    return any(p in e for p in _AUTH_PHRASES)
+
+
+def _is_rate_error(err: str) -> bool:
+    e = err.lower()
+    return any(p in e for p in _RATE_PHRASES)
+
+
+def _is_server_error(err: str) -> bool:
+    e = err.lower()
+    return any(c in e for c in ("500", "502", "503", "504", "internal server"))
+
+
+# ---------------------------------------------------------------------------
+# Key-Pool — das einzige was Sonu von Gemini CLI unterscheidet
+# Gemini CLI: 1 key, retry mit backoff
+# Sonu:       N keys, bei 429/daily-quota → naechsten Key
+# ---------------------------------------------------------------------------
+
+class KeyPool:
+    """Verwaltet N Gemini API-Keys mit Cooldown pro Key."""
+
+    # Cooldown-Dauern
+    DAILY_COOLDOWN = 3600.0      # 1h wenn Tages-Quota
+    RATE_COOLDOWN = 65.0         # 65s bei RPM-Limit
+    AUTH_COOLDOWN = 86400.0 * 30 # 30 Tage bei falschem Key (manuell resetten)
+
+    def __init__(self, keys: list[str], state_file: str):
+        self.keys = keys
+        self._state_file = state_file
+        # {key_index: {"until": float, "kind": str}}
+        self._cooldown: dict[int, dict] = {}
+        self._active = 0
+        self._load()
+
+    # -- Public API --
+
+    def active_key(self) -> str | None:
+        if not self.keys:
+            return None
+        return self.keys[self._active]
+
+    def active_index(self) -> int:
+        return self._active
+
+    def count(self) -> int:
+        return len(self.keys)
+
+    def mark_rate_limited(self, idx: int):
+        self._set_cooldown(idx, "rate", self.RATE_COOLDOWN)
+
+    def mark_daily_exhausted(self, idx: int):
+        self._set_cooldown(idx, "daily", self.DAILY_COOLDOWN)
+
+    def mark_auth_failed(self, idx: int):
+        self._set_cooldown(idx, "auth", self.AUTH_COOLDOWN)
+
+    def is_available(self, idx: int) -> bool:
+        entry = self._cooldown.get(idx)
+        if not entry:
+            return True
+        if entry["kind"] == "auth":
+            return False
+        return time.time() > entry["until"]
+
+    def rotate(self) -> bool:
+        """Wechselt zum naechsten verfuegbaren Key. Gibt False zurueck wenn alle erschoepft."""
+        for _ in range(len(self.keys)):
+            self._active = (self._active + 1) % len(self.keys)
+            if self.is_available(self._active):
+                return True
+        return False
+
+    def reset_all(self):
+        self._cooldown.clear()
+        self._save()
+
+    def status_lines(self) -> list[str]:
+        now = time.time()
+        lines = []
+        for i, key in enumerate(self.keys):
+            entry = self._cooldown.get(i)
+            if not entry:
+                tag = "OK"
+            elif entry["kind"] == "auth":
+                tag = "AUTH-FEHLER"
+            elif now < entry["until"]:
+                mins = int((entry["until"] - now) / 60)
+                tag = f"cooldown {mins}min ({entry['kind']})"
+            else:
+                tag = "OK (cooldown abgelaufen)"
+            marker = " <--" if i == self._active else ""
+            lines.append(f"  Key {i:2d}: ...{key[-6:]}{marker}  [{tag}]")
+        return lines
+
+    # -- Internal --
+
+    def _set_cooldown(self, idx: int, kind: str, duration: float):
+        self._cooldown[idx] = {"until": time.time() + duration, "kind": kind}
+        self._save()
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
+            with open(self._state_file, "w", encoding="utf-8") as f:
+                json.dump(self._cooldown, f)
+        except Exception:
+            pass
+
+    def _load(self):
+        if not os.path.exists(self._state_file):
+            return
+        try:
+            raw = json.load(open(self._state_file, encoding="utf-8"))
+            # int-keys nach JSON-Load sind strings
+            self._cooldown = {int(k): v for k, v in raw.items() if isinstance(v, dict)}
+        except Exception:
+            self._cooldown = {}
+
+
+# ---------------------------------------------------------------------------
+# System Prompt
+# ---------------------------------------------------------------------------
+
+SYSTEM_INSTRUCTION = """Du bist Sonu — ein autonomer Engineering-Agent im Terminal von Shubham Jayswal.
+
+## Verhalten
+
+**Denke zuerst, handle dann.** Bevor du Code schreibst oder Dateien aenderst: lies zuerst den relevanten Code (`grep_search` -> `read_file` mit Zeilenangaben). Aendere nie blind.
+
+**Sei ehrlich ueber Unsicherheit.** Wenn du dir nicht sicher bist, sage es. Kein Erfinden von APIs, Pfaden oder Verhalten. Verifiziere mit Tools.
+
+**Chirurgische Edits bevorzugen.** `replace` > `write_file`. Aendere nur was noetig ist. Keine unnötigen Umstrukturierungen nebenbei.
+
+**Antworte kurz und praezise.** Keine langen Einleitungen. Direkt zum Punkt. Auf Deutsch, ausser der Nutzer schreibt Englisch.
+
+**Validiere nach Aenderungen.** Nach Code-Edits: `run_shell("python -c 'import ast; ast.parse(open(\"file.py\").read())'")` oder Tests ausfuehren.
+
+**Secrets niemals loggen oder committen.** `.env`, API-Keys, Passwoerter bleiben lokal.
+
+## Tool-Strategie
+
+Suche -> Lies -> Plane -> Handle -> Validiere
+
+- **Finde Code**: `grep_search(pattern, context=3)` dann `read_file(path, start, end)`
+- **Editiere**: `replace` fuer chirurgische Aenderungen, `write_file` nur fuer neue Dateien
+- **Fuehre aus**: `run_shell` fuer Tests, Builds, Git-Status
+- **Rechne/Teste**: `run_python` fuer Berechnungen, Datenanalyse, schnelle Tests
+- **Recherchiere**: `google_search` fuer Fehler/Docs, `web_fetch` fuer spezifische URLs
+- **Delegiere**: `delegate_to_subagent` wenn parallele Analyse sinnvoll ist
+
+## Qualitaetsstandards
+
+- Bestehende Konventionen des Projekts uebernehmen (Stil, Struktur, Benennung)
+- Typen und Fehlerbehandlung nur wo noetig
+- Keine Kommentare die das Offensichtliche erklaeren
+- Bei Bugs: Root Cause finden, nicht Symptome pflastern
 """
 
 
+# ---------------------------------------------------------------------------
+# SonuClient — Kernklasse, analog zu GeminiChat + Turn in Gemini CLI
+# ---------------------------------------------------------------------------
+
 class SonuClient:
-    def __init__(self, model_name=None):
-        load_dotenv(override=True)
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-        load_dotenv(env_path, override=True)
 
-        self.api_key = os.getenv("GEMINI_API_KEY")
-        key_pool_str = os.getenv("GEMINI_KEY_POOL", "")
+    # Modell-Kette: erst 2.5-flash, bei Quota-Erschoepfung → 2.0-flash
+    MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
-        if key_pool_str:
-            self.keys = [k.strip() for k in key_pool_str.split(",") if k.strip()]
-        else:
-            self.keys = [self.api_key] if self.api_key else []
+    # Backoff wie Gemini CLI retry.ts: initialDelay=5s, max=30s, exponentiell
+    BACKOFF = [5, 10, 20, 30]
 
-        if not self.keys:
-            pass # We might not need gemini key if another provider is used, we'll check later.
+    def __init__(self, model_name: str | None = None):
+        _base = os.path.dirname(os.path.abspath(__file__))
+        load_dotenv(os.path.join(_base, ".env"), override=True)
 
-        self.active_index = 0
-        if self.api_key in self.keys:
-            self.active_index = self.keys.index(self.api_key)
-        elif self.keys:
-            self.api_key = self.keys[0]
+        # Keys laden
+        keys = self._load_keys(_base)
+        if not keys:
+            raise RuntimeError("Kein Gemini API-Key gefunden. Bitte GEMINI_API_KEY oder GEMINI_KEY_FILE setzen.")
 
-        # Initialisierung der fortgeschrittenen Manager
-        self.skills_mgr = SkillsManager()
-        self.process_mgr = ProcessManager()
-        self.memory_mgr = MemoryManager()
-        self.storage_mgr = StorageManager()
-        tools.set_process_manager(self.process_mgr)
+        state_file = os.path.join(_base, "logs", "keys_cooldown.json")
+        self._pool = KeyPool(keys, state_file)
 
-        self.client = None
-        if self.api_key:
-             self.client = genai.Client(api_key=self.api_key)
-             
-        self.chat = None
-        self.provider = "gemini"
-        self.oa_agents = {}
-        
-        prov_info = providers.get_provider("gemini")
-        self.model_name = model_name or prov_info["default_model"]
-        
-        if self.client:
-             self.reset_chat()
-             
-    def set_provider(self, name):
-        prov_info = providers.get_provider(name)
-        if not prov_info:
-            return False, f"Unbekannter Provider: {name}"
-            
-        env_var = prov_info["env_var"]
-        if env_var is not None and not os.getenv(env_var):
-            return False, f"Kein API Key gefunden fuer {name}. Setze {env_var} in .env"
-            
-        self.provider = name
-        self.model_name = prov_info["default_model"]
-        
-        if prov_info["kind"] == "openai":
-            if name not in self.oa_agents:
-                try:
-                    self.oa_agents[name] = OpenAICompatibleAgent(name, self.model_name, self)
-                except Exception as e:
-                    return False, f"Fehler beim Initialisieren von {name}: {e}"
-            else:
-                self.oa_agents[name].model = self.model_name
-                self.oa_agents[name]._build_system_message() # rebuild memory context
-                
-        elif prov_info["kind"] == "gemini":
-            if not self.client:
-                return False, "Gemini Client ist nicht konfiguriert (Key fehlt)."
-            self.reset_chat()
-            
-        return True, f"Provider gewechselt zu {name}. Standardmodell: {self.model_name}"
+        # Modell
+        self.model_name = model_name or os.getenv("GEMINI_MODEL", self.MODEL_CHAIN[0])
 
-    def _skill_tool(self):
-        """Zusatz-Tool, mit dem der Agent selbst ein Skill-Profil aktivieren kann."""
-        names = self.skills_mgr.list_skills()
-        desc = (
-            "Aktiviert ein Experten-Skill-Profil, das deinen Fokus, deine Methodik und deinen Ton umstellt. "
-            "Mit name='off' deaktivierst du das aktive Skill. Verfuegbare Skills: "
-            + (", ".join(names) if names else "(keine)")
-        )
-        return types.Tool(function_declarations=[types.FunctionDeclaration(
-            name="activate_skill",
-            description=desc,
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={"name": types.Schema(type=types.Type.STRING, description="Name des zu aktivierenden Skills, oder 'off' zum Deaktivieren.")},
-                required=["name"],
-            ),
-        )])
+        # Gemini SDK Client + Chat
+        self._client = None
+        self._chat = None
+        self._current_key_index = -1  # erzwingt Init beim ersten Call
 
-    def _build_config(self):
-        # 1. 4-Level Gedaechtnis abrufen
-        mem_context = self.memory_mgr.load_memory(os.getcwd())
+        # Lazy module instances
+        self._process_mgr = None
+        self._skills_mgr = None
+        self._plan_mode = None
 
-        # 2. Aktiven Experten-Skill laden
-        active_instruction = SYSTEM_INSTRUCTION
-        if self.skills_mgr.active_skill:
-            try:
-                skill_content = self.skills_mgr.activate_skill(self.skills_mgr.active_skill)
-                active_instruction += (
-                    f"\n\n=== ERWÄHLTE EXPERTEN-SKILL-REGELN ({self.skills_mgr.active_skill}) ===\n"
-                    f"{skill_content}\n"
-                )
-            except Exception:
-                pass
+        # YOLO-Modus
+        self._yolo = False
 
-        # 3. Systemkontext assemblieren
-        full_sys_prompt = (
-            f"{active_instruction}\n\n"
-            f"=== ERMITTELTER SYSTEMKONTEXT (4-EBENEN-GEDÄCHTNIS) ===\n"
-            f"{mem_context}\n"
-        )
+    # -- Oeffentliche Properties --
 
-        return types.GenerateContentConfig(
-            system_instruction=full_sys_prompt,
-            tools=[tools.get_tool_object(), self._skill_tool()],
-        )
+    @property
+    def yolo(self) -> bool:
+        return self._yolo
 
-    def _rebuild_preserving_history(self):
-        """Baut die Chat-Session neu auf (z.B. nach Skill-Wechsel), ohne den Verlauf zu verlieren."""
-        old_history = None
-        try:
-            old_history = self.chat.get_history() if self.chat else None
-        except Exception:
-            old_history = None
-        self.reset_chat(history=old_history)
+    @yolo.setter
+    def yolo(self, val: bool):
+        self._yolo = val
 
-    def set_skill(self, name):
-        """Aktiviert/deaktiviert ein Skill und baut den Prompt neu auf. Gibt (ok, nachricht)."""
-        if name in (None, "", "none", "clear", "off", "aus", "deactivate"):
-            self.skills_mgr.deactivate_skill()
-            self._rebuild_preserving_history()
-            return True, "Skill deaktiviert. Zurueck zum Baseline-Modus."
-        try:
-            self.skills_mgr.activate_skill(name)
-        except Exception:
-            avail = ", ".join(self.skills_mgr.list_skills()) or "(keine)"
-            return False, f"Skill '{name}' nicht gefunden. Verfuegbar: {avail}"
-        self._rebuild_preserving_history()
-        return True, f"Skill '{name}' aktiviert."
+    @property
+    def process_mgr(self):
+        if self._process_mgr is None:
+            from process_manager import ProcessManager
+            self._process_mgr = ProcessManager()
+        return self._process_mgr
 
-    def reset_chat(self, history=None):
-        """Initialisiert oder resettet die Chat-Session, optional mit erhaltenem Verlauf."""
-        try:
-            self.chat = self.client.chats.create(
-                model=self.model_name,
-                config=self._build_config(),
-                history=history,
-            )
-        except Exception as e:
-            raise Exception(f"Fehler beim Erstellen des Chats fuer Modell '{self.model_name}': {str(e)}")
+    @property
+    def skills_mgr(self):
+        if self._skills_mgr is None:
+            from skills_manager import SkillsManager
+            self._skills_mgr = SkillsManager()
+        return self._skills_mgr
 
-    @staticmethod
-    def _is_quota_error(error_str: str) -> bool:
-        s = error_str.lower()
-        return any(k in s for k in [
-            "quota", "rate limit", "resource_exhausted", "429",
-            "api key expired", "api_key_invalid", "permission_denied",
-            "api key not valid", "403", "forbidden", "limit reached",
-            "insufficient permissions"
-        ])
+    @property
+    def plan_mode(self):
+        if self._plan_mode is None:
+            from plan_mode import PlanMode
+            self._plan_mode = PlanMode()
+        return self._plan_mode
 
-    @staticmethod
-    def _is_server_error(error_str: str) -> bool:
-        s = error_str.lower()
-        return any(k in s for k in ["503", "high demand", "unavailable", "server error", "500", "502", "504"])
+    @property
+    def key_pool(self) -> KeyPool:
+        return self._pool
 
-    def rotate_key(self):
-        """Rotiert zum naechsten Key im Pool, erhaelt den Gespraechsverlauf und aktualisiert .env."""
-        if len(self.keys) <= 1:
-            return False
+    # -- Hauptmethode: run_agent_turn --
+    # Portiert von Gemini CLI Turn.run() + agent loop
 
-        # Damping factor: prevent microsecond "contact bounce" when rotating under rate limits
-        time.sleep(0.5)
-
-        old_history = None
-        try:
-            old_history = self.chat.get_history() if self.chat else None
-        except Exception:
-            old_history = None
-
-        self.active_index = (self.active_index + 1) % len(self.keys)
-        new_key = self.keys[self.active_index]
-        self.api_key = new_key
-
-        self.client = genai.Client(api_key=new_key)
-        self._update_env_file(new_key)
-        self.reset_chat(history=old_history)
-        return True
-
-    def _update_env_file(self, new_key):
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-        if not os.path.exists(env_path):
-            return
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            with open(env_path, "w", encoding="utf-8") as f:
-                for line in lines:
-                    if line.lstrip().startswith("GEMINI_API_KEY="):
-                        f.write(f"GEMINI_API_KEY={new_key}\n")
-                    else:
-                        f.write(line)
-        except Exception:
-            pass
-
-    def _send_with_rotation(self, message):
-        """Sendet eine Nachricht mit exponential Backoff und Key-Rotation."""
-        if not self.chat:
-            self.reset_chat()
-            
-        backoff_schedule = [2, 4, 8]
-        
-        for attempt in range(len(backoff_schedule) + 1):
-            try:
-                # Versuche alle Keys im Pool
-                for _ in range(max(1, len(self.keys))):
-                    try:
-                        start_time = time.time()
-                        resp = self.chat.send_message(message)
-                        latency = (time.time() - start_time) * 1000
-
-                        prompt_tokens = 0
-                        completion_tokens = 0
-                        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
-                            prompt_tokens = getattr(resp.usage_metadata, "prompt_token_count", 0)
-                            completion_tokens = getattr(resp.usage_metadata, "candidates_token_count", 0)
-                        
-                        if prompt_tokens or completion_tokens:
-                            self.storage_mgr.log_token_usage(
-                                provider=self.provider,
-                                model=self.model_name,
-                                prompt_tokens=prompt_tokens,
-                                completion_tokens=completion_tokens,
-                                latency_ms=latency,
-                                estimated_cost_usd=0.0
-                            )
-
-                        return resp
-                    except Exception as e:
-                        err_str = str(e)
-                        if self._is_quota_error(err_str) and len(self.keys) > 1:
-                            if self.rotate_key():
-                                continue
-                        raise
-            except Exception as e:
-                err_str = str(e)
-                if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):
-                    time.sleep(backoff_schedule[attempt])
-                    continue
-                raise e
-        
-        return None # Sollte nie erreicht werden wegen raise e
-
-    def send_message_stream(self, message):
-        """Sendet eine Nachricht als Stream mit Backoff und Key-Rotation."""
-        if not self.chat:
-            self.reset_chat()
-
-        backoff_schedule = [2, 4, 8]
-        
-        for attempt in range(len(backoff_schedule) + 1):
-            try:
-                for _ in range(max(1, len(self.keys))):
-                    try:
-                        response_stream = self.chat.send_message_stream(message)
-                        iterator = iter(response_stream)
-                        
-                        # Erste Antwort abfragen, um Quota sofort zu testen
-                        first_chunk = next(iterator)
-                        
-                        def stream_generator():
-                            yield first_chunk
-                            for chunk in iterator:
-                                yield chunk
-                        return stream_generator()
-                    except StopIteration:
-                        def empty_generator():
-                            yield from []
-                        return empty_generator()
-                    except Exception as e:
-                        err_str = str(e)
-                        if self._is_quota_error(err_str) and len(self.keys) > 1:
-                            if self.rotate_key():
-                                continue
-                        raise
-            except Exception as e:
-                err_str = str(e)
-                if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):
-                    time.sleep(backoff_schedule[attempt])
-                    continue
-                raise e
-        
-        return None
-
-    def _get_fallback_providers(self):
-        """Findet alle Provider, fuer die ein API-Key in der .env existiert, ausser dem aktuellen."""
-        available = []
-        for p in providers.list_providers():
-            if p == self.provider: 
-                continue
-            prov_info = providers.get_provider(p)
-            # Offline-Provider haben keinen env_var, online muessen einen Key haben.
-            if prov_info["env_var"] is None or os.getenv(prov_info["env_var"]):
-                available.append(p)
-        return available
-
-    def _check_internet_connection(self):
-        import socket
-        try:
-            # Versuche, eine Verbindung zu einem zuverlaessigen Server herzustellen
-            socket.create_connection(("1.1.1.1", 53), timeout=2)
-            return True
-        except OSError:
-            pass
-        return False
-
-    def run_agent_turn(self, user_input, ui, max_steps=25):
-        """Wrapper fuer den Agent-Loop mit kaskadierendem automatischem Provider-Fallback.
-        Versucht alle verfuegbaren Provider nacheinander, bis einer erfolgreich antwortet.
+    def run_agent_turn(self, user_input: str, ui, max_steps: int = 30) -> str:
         """
-        is_online = self._check_internet_connection()
-        if not is_online and "ollama" in providers.list_providers() and self.provider != "ollama":
-            self.set_provider("ollama")
-
-        active_providers = [self.provider] + self._get_fallback_providers()
-        if "ollama" in active_providers and active_providers[0] != "ollama":
-            active_providers.remove("ollama")
-            active_providers.append("ollama")
-            
-        last_error = None
-        backoff_schedule = [2, 4, 8]
-        
-        for prov in active_providers:
-            if prov != self.provider:
-                ok, msg = self.set_provider(prov)
-                if not ok:
-                    continue
-            
-            for attempt in range(len(backoff_schedule) + 1):
-                try:
-                    return self._run_agent_turn_internal(user_input, ui, max_steps)
-                except Exception as e:
-                    err_str = str(e).lower()
-                    is_retryable = (
-                        self._is_quota_error(err_str) or 
-                        self._is_server_error(err_str) or 
-                        any(k in err_str for k in ["connection", "timeout", "network", "socket"])
-                    )
-                    
-                    if is_retryable and attempt < len(backoff_schedule):
-                        time.sleep(backoff_schedule[attempt])
-                        continue
-                        
-                    last_error = e
-                    break # Zum naechsten Provider wechseln
-                    
-        raise Exception(f"Alle konfigurierten Provider sind fehlgeschlagen! Letzter Fehler: {last_error}")
-
-    def _run_agent_turn_internal(self, user_input, ui, max_steps=25):
-        """Agentischer Loop: sendet die Eingabe, fuehrt angeforderte Tools aus und
-        speist die Ergebnisse zurueck, bis das Modell eine finale Textantwort liefert.
+        Fuehrt einen vollen Agenten-Turn durch:
+        1. send_message
+        2. Tool-Calls ausfuehren
+        3. Ergebnis senden
+        4. Wiederholen bis kein Tool-Call mehr
+        Exakt wie Gemini CLI turn.ts, nur mit Key-Rotation bei 429.
         """
-        if self.provider != "gemini":
-            return self.oa_agents[self.provider].run_agent_turn(user_input, ui, max_steps)
+        import tools as _tools
 
-        if self.chat:
-            old_history = self.chat.get_history()
-            new_history = compress_gemini_history(old_history, self.model_name, self.client)
-            if len(new_history) != len(old_history):
-                self.reset_chat(history=new_history)
+        self._ensure_client()
+        ui.update_status(f"{self.model_name} · k{self._pool.active_index()}/{self._pool.count()} verarbeitet...")
 
-        resp = self._send_with_rotation(user_input)
+        resp = self._send(user_input)
+        collected_text = []
 
-        for _ in range(max_steps):
-            function_calls = getattr(resp, "function_calls", None) or []
+        for step in range(max_steps):
+            # Text aus dieser Response sammeln
+            t = self._text(resp)
+            if t:
+                collected_text.append(t)
 
-            if not function_calls:
-                return self._extract_text(resp)
+            fcs = self._extract_function_calls(resp)
 
-            interim = self._extract_text(resp)
-            if interim:
-                ui.show_agent_thought(interim)
+            if not fcs:
+                # Kein Tool-Call mehr → fertig
+                return "\n".join(collected_text) if collected_text else ""
 
+            # Zwischen-Text anzeigen
+            if t:
+                ui.show_agent_status(t)
+                collected_text.clear()  # wird schon angezeigt, nicht doppelt ausgeben
+
+            # Tools ausfuehren
             response_parts = []
-            for fc in function_calls:
+            for fc in fcs:
                 name = fc.name
                 args = dict(fc.args) if fc.args else {}
 
                 ui.show_tool_call(name, args)
 
-                # Skill-Aktivierung wird im Client behandelt (aendert den System-Prompt),
-                # nicht ueber tools.dispatch. Keine Bestaetigung noetig.
-                if name == "activate_skill":
-                    ok, msg = self.set_skill(args.get("name"))
-                    ui.show_tool_result(name, msg, rejected=not ok)
-                    response_parts.append(
-                        types.Part.from_function_response(name=name, response={"result": msg})
-                    )
-                    continue
+                if not self._yolo and not _tools.is_safe(name):
+                    answer = ui.confirm_action(name, args)
+                    result = _tools.dispatch(name, args) if answer else "[Abgelehnt vom Nutzer]"
+                else:
+                    result = _tools.dispatch(name, args)
 
-                if not tools.is_safe(name):
-                    if not ui.confirm_action(name, args):
-                        result = "ABGELEHNT: Der Nutzer hat diese Aktion abgelehnt."
-                        ui.show_tool_result(name, result, rejected=True)
-                        response_parts.append(
-                            types.Part.from_function_response(name=name, response={"result": result})
-                        )
-                        continue
-
-                result = tools.dispatch(name, args)
                 ui.show_tool_result(name, result)
+
                 response_parts.append(
-                    types.Part.from_function_response(name=name, response={"result": result})
+                    types.Part.from_function_response(
+                        name=name,
+                        response={"result": str(result)},
+                    )
                 )
 
-            resp = self._send_with_rotation(response_parts)
+            ui.update_status(f"{self.model_name} · k{self._pool.active_index()}/{self._pool.count()} verarbeitet...")
+            resp = self._send(response_parts)
 
-        return "(Abbruch: maximale Anzahl an Tool-Schritten erreicht.)"
+        return self._text(resp) or "\n".join(collected_text) or "(max_steps erreicht)"
+
+    # -- Chat-Verwaltung --
+
+    def reset_chat(self, history=None):
+        """Startet einen neuen Chat (z.B. nach /clear)."""
+        self._chat = None
+        self._ensure_client()
+        import tools as _tools
+        self._chat = self._client.chats.create(
+            model=self.model_name,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                tools=[_tools.get_tool_object()],
+                temperature=0.0,
+            ),
+            history=history or [],
+        )
+
+    def get_history(self):
+        if self._chat is None:
+            return []
+        try:
+            return self._chat.get_history()
+        except Exception:
+            return []
+
+    def set_model(self, model_name: str):
+        """Wechselt das Modell und erstellt einen neuen Chat mit der alten History."""
+        old_history = self.get_history()
+        self.model_name = model_name
+        self._client = None
+        self._chat = None
+        self._current_key_index = -1
+        self._ensure_client()
+        self.reset_chat(history=old_history)
+
+    # -- Internes --
+
+    def _load_keys(self, base_dir: str) -> list[str]:
+        keys = []
+
+        # 1. Key-Datei (bevorzugt, utf-8-sig entfernt BOM automatisch)
+        key_file = os.getenv("GEMINI_KEY_FILE", "")
+        if key_file:
+            if not os.path.isabs(key_file):
+                key_file = os.path.join(base_dir, key_file)
+            if os.path.exists(key_file):
+                try:
+                    with open(key_file, "r", encoding="utf-8-sig") as f:
+                        keys = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+                except Exception as e:
+                    print(f"Fehler beim Laden der Key-Datei: {e}")
+
+        # 2. Key-Pool aus .env
+        if not keys:
+            pool_str = os.getenv("GEMINI_KEY_POOL", "")
+            if pool_str:
+                keys = [k.strip() for k in pool_str.split(",") if k.strip()]
+
+        # 3. Einzelner Key als Fallback
+        if not keys:
+            single = os.getenv("GEMINI_API_KEY", "")
+            if single:
+                keys = [single]
+
+        return keys
+
+    def _ensure_client(self):
+        """Erstellt SDK-Client fuer den aktiven Key, falls noetig."""
+        idx = self._pool.active_index()
+        if self._client is not None and idx == self._current_key_index:
+            return
+
+        key = self._pool.active_key()
+        if not key:
+            raise QuotaExhaustedException(self.model_name, 0)
+
+        from google import genai as _genai
+        self._client = _genai.Client(api_key=key)
+        self._current_key_index = idx
+        self._chat = None  # Chat gehoert zum alten Key
+
+    def _send(self, message) -> object:
+        """
+        Sendet eine Nachricht mit:
+        - Key-Rotation bei 429/daily-quota (Sonu-spezifisch)
+        - Exponential Backoff bei 5xx/rate-limit (wie Gemini CLI retry.ts)
+        - Auth-Fehler → Key permanent deaktivieren, weiter mit naechstem
+        """
+        if self._chat is None:
+            self.reset_chat()
+
+        last_err: Exception | None = None  # noqa: F841
+        # Aeussere Schleife: Keys durchprobieren
+        keys_tried = 0
+        while keys_tried < self._pool.count():
+            # Innere Schleife: Backoff-Versuche pro Key (wie Gemini CLI)
+            for attempt, delay_s in enumerate([0] + self.BACKOFF):
+                if delay_s > 0:
+                    time.sleep(delay_s)
+                try:
+                    resp = self._chat.send_message(message)
+                    return resp
+                except Exception as e:
+                    last_err = e
+                    err = str(e)
+
+                    if _is_auth_error(err):
+                        # Key permanent kaputt — direkt weiter zum naechsten
+                        self._pool.mark_auth_failed(self._pool.active_index())
+                        break  # aus Backoff-Schleife, rotate
+
+                    if _is_daily_quota(err):
+                        # Tages-Quota voll — naechsten Key
+                        self._pool.mark_daily_exhausted(self._pool.active_index())
+                        break
+
+                    if _is_rate_error(err):
+                        # RPM-Limit — kurz warten, dann gleichem Key nochmal
+                        self._pool.mark_rate_limited(self._pool.active_index())
+                        if attempt < len(self.BACKOFF):
+                            continue  # Backoff-Loop weiter
+                        break  # Backoff erschoepft → rotate
+
+                    if _is_server_error(err):
+                        # 5xx — Backoff wie Gemini CLI
+                        if attempt < len(self.BACKOFF):
+                            continue
+                        break
+
+                    # Unbekannter Fehler → sofort weiterwerfen
+                    raise
+
+            # Key wechseln
+            if not self._pool.rotate():
+                break  # Alle Keys erschoepft
+
+            keys_tried += 1
+            # Neuen Client + Chat fuer den neuen Key erstellen
+            old_history = self.get_history()
+            self._ensure_client()
+            self.reset_chat(history=old_history)
+
+        raise QuotaExhaustedException(self.model_name, self._pool.count())
 
     @staticmethod
-    def _extract_text(resp):
+    def _extract_function_calls(resp) -> list:
+        """Extrahiert Function Calls robust aus der Response — wie Gemini CLI functionCalls()."""
+        # Methode 1: direktes Attribut
         try:
-            return (resp.text or "").strip()
+            fcs = resp.function_calls
+            if fcs:
+                return list(fcs)
+        except Exception:
+            pass
+        # Methode 2: ueber candidates.content.parts (zuverlaessiger bei gemischten Responses)
+        try:
+            parts = resp.candidates[0].content.parts
+            return [p.function_call for p in parts if getattr(p, "function_call", None)]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _text(resp) -> str:
+        """Extrahiert Text aus einer Gemini-Response (wie getResponseText in Gemini CLI)."""
+        # Methode 1: ueber parts — sicherer als resp.text das bei function_calls warnt
+        try:
+            parts = resp.candidates[0].content.parts
+            texts = [p.text for p in parts if getattr(p, "text", None) and not getattr(p, "function_call", None)]
+            if texts:
+                return "".join(texts)
+        except Exception:
+            pass
+        # Methode 2: resp.text als Fallback
+        try:
+            return resp.text or ""
         except Exception:
             return ""
-
-    # --- Hilfsbefehle fuer die REPL -------------------------------------------------
-
-    def list_available_models(self):
-        models = []
-        if self.provider == "gemini":
-            try:
-                for m in self.client.models.list():
-                    name = m.name.replace("models/", "")
-                    models.append(name)
-            except Exception as e:
-                raise Exception(f"Fehler beim Auflisten der Modelle: {str(e)}")
-        else:
-            try:
-                for m in self.oa_agents[self.provider].client.models.list():
-                    models.append(m.id)
-            except Exception as e:
-                pass # Many OpenAI compatible providers fail or return 404 for models.list()
-        return models
-
-    def set_model(self, model_name):
-        self.model_name = model_name
-        if self.provider == "gemini":
-            self.reset_chat()
-        else:
-            self.oa_agents[self.provider].model = model_name
