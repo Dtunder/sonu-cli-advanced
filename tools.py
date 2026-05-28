@@ -152,6 +152,81 @@ def run_shell(command: str) -> str:
         return f"FEHLER bei der Ausfuehrung: {e}"
 
 
+
+import shutil
+import glob
+import tempfile
+
+def _find_jules_exe() -> str:
+    """Finds the path to jules.exe dynamically."""
+    # 1. Try finding it in PATH
+    path = shutil.which("jules") or shutil.which("jules.exe")
+    if path:
+        return path
+
+    # 2. Check local directory
+    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jules.exe")
+    if os.path.exists(local_path):
+        return local_path
+
+    # 3. Check AppData/Local/jules (Windows)
+    if os.name == 'nt':
+        appdata = os.environ.get("LOCALAPPDATA")
+        if appdata:
+            appdata_path = os.path.join(appdata, "jules", "jules.exe")
+            if os.path.exists(appdata_path):
+                return appdata_path
+
+    # 4. Glob search as fallback
+    try:
+        if os.name == 'nt':
+            appdata = os.environ.get("LOCALAPPDATA", "")
+            if appdata:
+                matches = glob.glob(os.path.join(appdata, "**", "jules.exe"), recursive=True)
+                if matches: return matches[0]
+    except Exception:
+        pass
+
+    return "jules.exe" # fallback to just the name, hoping it's in path anyway
+
+def _copy_tarball_backup():
+    """Kopiert das Tarball-Backup vor dem Aufruf von jules.exe (kritisch fuer Windows Temp-Bereinigung)."""
+    try:
+        curr_dir = os.path.dirname(os.path.abspath(__file__))
+        tarball_path = os.path.join(curr_dir, "jules.tar.gz")
+        if os.path.exists(tarball_path):
+            temp_dir = tempfile.gettempdir()
+            dest = os.path.join(temp_dir, "jules_backup.tar.gz")
+            shutil.copy2(tarball_path, dest)
+            return True
+    except Exception as e:
+        print(f"Warnung: Tarball konnte nicht kopiert werden: {e}")
+    return False
+
+def jules_remote_list() -> str:
+    """Listet alle remote Google Jules Sessions auf."""
+    _copy_tarball_backup()
+    exe = _find_jules_exe()
+    try:
+        result = subprocess.run([exe, "remote", "list", "--session"], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return result.stdout.strip() or "Keine Sessions gefunden."
+        return f"FEHLER beim Abrufen der Sessions:\n{result.stderr.strip()}"
+    except Exception as e:
+        return f"FEHLER: {e}"
+
+def jules_remote_pull(session_id: str) -> str:
+    """Zieht den Code einer spezifischen Jules Session und wendet ihn an."""
+    _copy_tarball_backup()
+    exe = _find_jules_exe()
+    try:
+        result = subprocess.run([exe, "remote", "pull", "--session", session_id, "--apply"], capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            return f"OK: Session {session_id} erfolgreich angewendet.\n{result.stdout.strip()}"
+        return f"FEHLER beim Pull der Session {session_id}:\n{result.stderr.strip()}"
+    except Exception as e:
+        return f"FEHLER: {e}"
+
 _process_manager = None
 
 def set_process_manager(pm):
@@ -207,6 +282,7 @@ def delegate_to_jules(prompt: str) -> str:
     if not _process_manager:
         return "FEHLER: ProcessManager nicht initialisiert."
     try:
+        _copy_tarball_backup()
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(curr_dir, "jules_delegator.py")
         cmd = f"python \"{script_path}\" \"{prompt}\""
@@ -485,6 +561,24 @@ REGISTRY = {
             name="kill_background_task",
             description="Beendet einen laufenden Hintergrund-Task gewaltsam.",
             parameters=_schema({"task_id": types.Schema(type=types.Type.INTEGER, description="ID des zu beendenden Tasks.")}, ["task_id"]),
+        ),
+    },
+    "jules_remote_list": {
+        "func": jules_remote_list,
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="jules_remote_list",
+            description="Listet alle remote Google Jules Sessions auf. Nutze dies, um offene Tasks von Jules zu sehen.",
+            parameters=_schema({}, []),
+        ),
+    },
+    "jules_remote_pull": {
+        "func": jules_remote_pull,
+        "safe": False,
+        "declaration": types.FunctionDeclaration(
+            name="jules_remote_pull",
+            description="Zieht den Code einer Jules Session und wendet ihn an.",
+            parameters=_schema({"session_id": _str("Die ID der Session (18-20 Ziffern).")}, ["session_id"]),
         ),
     },
     "delegate_to_jules": {
