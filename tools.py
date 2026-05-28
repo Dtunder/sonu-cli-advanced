@@ -215,7 +215,7 @@ def delegate_to_jules(prompt: str) -> str:
     except Exception as e:
         return f"FEHLER beim Starten der Jules-Delegierung: {e}"
 
-def delegate_to_subagent(task_description: str, provider: str = None, skill: str = None) -> str:
+def delegate_to_subagent(task_description: str, provider: str = None) -> str:
     """Delegiert eine isolierte Teilaufgabe an einen autonomen Sub-Agenten (headless)."""
     try:
         from sonu_client import SonuClient
@@ -251,14 +251,6 @@ def delegate_to_subagent(task_description: str, provider: str = None, skill: str
         if provider and providers.get_provider(provider):
             client.set_provider(provider)
             
-        # Activate specific skill if specified
-        if skill:
-            try:
-                client.set_skill(skill)
-                ui.log.append(f"=== Aktiviere Experten-Skill: {skill} ===")
-            except Exception as e:
-                ui.log.append(f"WARNUNG: Konnte Skill '{skill}' nicht aktivieren: {e}")
-
         ui.log.append(f"=== Starte autonomen Sub-Agenten (Provider: {client.provider}) ===")
         
         final_answer = client.run_agent_turn(f"SUB-AGENT TASK: {task_description}\nErledige dies autonom. Verwende deine Werkzeuge (lies Dateien, suche, etc). Antworte am Ende mit einer ausfuehrlichen, endgueltigen Zusammenfassung deiner Ergebnisse und Analysen.", ui, max_steps=15)
@@ -270,15 +262,9 @@ def delegate_to_subagent(task_description: str, provider: str = None, skill: str
 
 
 def create_git_branch(branch_name: str) -> str:
-    """Erstellt einen neuen Git-Branch und wechselt in diesen. Falls er existiert, wird dorthin gewechselt."""
+    """Erstellt einen neuen Git-Branch und wechselt in diesen."""
     try:
         subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
-        # Check if branch exists
-        check_branch = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"], capture_output=True)
-        if check_branch.returncode == 0:
-            subprocess.run(["git", "checkout", branch_name], check=True, capture_output=True, text=True)
-            return f"OK: Branch '{branch_name}' existiert bereits. Dorthin gewechselt."
-
         result = subprocess.run(
             ["git", "checkout", "-b", branch_name],
             capture_output=True,
@@ -287,13 +273,13 @@ def create_git_branch(branch_name: str) -> str:
         if result.returncode == 0:
             return f"OK: Branch '{branch_name}' erstellt und ausgecheckt."
         return f"FEHLER: Konnte Branch nicht erstellen.\n{result.stderr.strip()}"
-    except subprocess.CalledProcessError as e:
-        return f"FEHLER bei Git-Checkout: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+    except subprocess.CalledProcessError:
+        return "FEHLER: Nicht in einem Git-Repository."
     except Exception as e:
         return f"FEHLER bei Git-Branch-Erstellung: {e}"
 
 def commit_git_changes(message: str) -> str:
-    """Fuegt alle Aenderungen hinzu, committet sie und pusht den aktuellen Branch auf remote."""
+    """Fuegt alle Aenderungen hinzu und committet sie."""
     try:
         subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], check=True, capture_output=True, text=True)
         subprocess.run(["git", "add", "."], check=True, capture_output=True, text=True)
@@ -302,26 +288,10 @@ def commit_git_changes(message: str) -> str:
             capture_output=True,
             text=True,
         )
-
-        # Determine if there's anything to push even if commit said "nothing to commit"
-        push_msg = ""
-
-        # Get current branch
-        branch_res = subprocess.run(["git", "branch", "--show-current"], check=True, capture_output=True, text=True)
-        branch = branch_res.stdout.strip()
-
-        # Push to remote
-        push_res = subprocess.run(["git", "push", "-u", "origin", "HEAD"], capture_output=True, text=True)
-        if push_res.returncode == 0:
-            push_msg = f"\nErfolgreich auf 'origin/{branch}' gepusht."
-        else:
-            push_msg = f"\nWARNUNG: Konnte nicht pushen: {push_res.stderr.strip()}"
-
         if result.returncode == 0:
-            return f"OK: Aenderungen committet mit Nachricht '{message}'.\n{result.stdout.strip()}{push_msg}"
+            return f"OK: Aenderungen committet mit Nachricht '{message}'.\n{result.stdout.strip()}"
         elif "nothing to commit" in result.stdout:
-            return f"OK: Keine Aenderungen zu committen.{push_msg}"
-
+            return "OK: Keine Aenderungen zu committen."
         return f"FEHLER beim Committen.\nstdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
     except subprocess.CalledProcessError as e:
         if e.cmd[1] == "add":
@@ -341,18 +311,8 @@ def create_github_pull_request(title: str, body: str) -> str:
 ---
 *Created automatically by Sonu CLI*
 """
-        # Check for existing PR first
-        pr_check = subprocess.run(["gh", "pr", "view", "--json", "url"], capture_output=True, text=True)
-        if pr_check.returncode == 0:
-            import json
-            try:
-                pr_data = json.loads(pr_check.stdout)
-                return f"OK: Ein Pull Request existiert bereits fuer diesen Branch.\nURL: {pr_data.get('url')}"
-            except Exception:
-                pass
-
         result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", formatted_body, "--head", "@"],
+            ["gh", "pr", "create", "--title", title, "--body", formatted_body],
             capture_output=True,
             text=True,
         )
@@ -370,57 +330,6 @@ def create_github_pull_request(title: str, body: str) -> str:
 # 'safe' = read-only, laeuft ohne Bestaetigung.
 # ---------------------------------------------------------------------------
 
-
-def capture_and_analyze_viewport(prompt: str = "Analysiere dieses UI. Was ist kaputt und wie laesst es sich beheben?") -> str:
-    """Macht einen Screenshot des aktuellen Bildschirms, konvertiert ihn zu Base64 und sendet ihn zur Multimodal-Analyse an Gemini."""
-    try:
-        import mss
-        import base64
-        import tempfile
-        import os
-        from google import genai
-        from google.genai import types
-
-        # Take screenshot
-        with mss.mss() as sct:
-            filename = sct.shot(mon=-1, output=os.path.join(tempfile.gettempdir(), 'screenshot.png'))
-
-        # Read and convert to base64
-        with open(filename, "rb") as image_file:
-            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-
-        # Clean up
-        try:
-            os.remove(filename)
-        except Exception:
-            pass
-
-        # Call Gemini Vision API
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return "FEHLER: GEMINI_API_KEY ist nicht gesetzt."
-
-        client = genai.Client(api_key=api_key)
-
-        # Prepare the payload for Gemini multimodal
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[
-                prompt,
-                types.Part.from_bytes(
-                    data=base64.b64decode(encoded_string),
-                    mime_type='image/png',
-                ),
-            ]
-        )
-
-        return f"OK: Screenshot analysiert.\nErgebnis: {response.text}"
-    except ImportError as e:
-        return f"FEHLER: Benötigte Bibliothek fehlt. Führe 'pip install mss Pillow' aus.\nDetails: {e}"
-    except Exception as e:
-        return f"FEHLER bei Screenshot-Analyse: {e}"
-
-
 def _schema(props: dict, required: list) -> types.Schema:
     return types.Schema(type=types.Type.OBJECT, properties=props, required=required)
 
@@ -430,18 +339,6 @@ def _str(desc: str) -> types.Schema:
 
 
 REGISTRY = {
-    "capture_and_analyze_viewport": {
-        "func": capture_and_analyze_viewport,
-        "safe": False,
-        "declaration": types.FunctionDeclaration(
-            name="capture_and_analyze_viewport",
-            description="Macht einen Screenshot des aktuellen Bildschirms und sendet ihn zur Multimodal-Analyse an Gemini.",
-            parameters=_schema({
-                "prompt": _str("Optionaler Prompt für die Analyse (z.B. nach UI Bugs suchen).")
-            }, []),
-        ),
-    },
-
     "create_git_branch": {
         "func": create_git_branch,
         "safe": False,
@@ -607,8 +504,7 @@ REGISTRY = {
             description="Delegiert eine Recherche, Analyse oder Coding-Teilaufgabe an einen isolierten, autonomen Sonu-Subagenten. Verhindert, dass dein eigener Kontext ueberflutet wird. Gib ihm eine SEHR ausfuehrliche Anweisung.",
             parameters=_schema({
                 "task_description": _str("Detaillierte Anweisung und Ziel fuer den Sub-Agenten."),
-                "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten."),
-                "skill": _str("Optional: Name eines Experten-Skills, das der Subagent aktivieren soll (z.B. 'fullstack-developer', 'security-auditor', 'devops-engineer').")
+                "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten.")
             }, ["task_description"]),
         ),
     },

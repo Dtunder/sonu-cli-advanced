@@ -4,6 +4,3 @@ rich
 prompt_toolkit
 python-dotenv
 tiktoken
-
-mss
-Pillow

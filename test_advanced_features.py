@@ -49,7 +49,7 @@ def test_process_manager():
     pm = ProcessManager()
     
     # Hintergrundbefehl starten (kurzer Ping)
-    cmd = "ping -c 3 127.0.0.1" if os.name != 'nt' else "ping 127.0.0.1 -n 3"
+    cmd = "ping 127.0.0.1 -n 3"
     print(f"Starte Hintergrundprozess: {cmd}")
     tid = pm.start_task(cmd)
     
