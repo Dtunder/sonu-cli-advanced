@@ -41,7 +41,6 @@ Arbeitsweise:
 - Du kannst mehrere Werkzeuge nacheinander aufrufen, bis die Aufgabe geloest ist.
 - Schreibende, ausfuehrende und delegierende Aktionen werden dem Nutzer zur Bestaetigung vorgelegt. Wird etwas abgelehnt, respektiere das und schlage eine Alternative vor.
 - Nutze bevorzugt relative Pfade zum aktuellen Arbeitsverzeichnis.
-- Rufe NIEMALS get_todos() oder write_todos() automatisch auf. Nur wenn der User explizit nach Todos fragt.
 - Antworte am Ende knapp auf Deutsch in einem praezisen, mechatronisch-kompetenten Ton und fasse zusammen, was du getan hast.
 """
 
