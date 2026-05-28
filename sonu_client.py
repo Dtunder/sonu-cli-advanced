@@ -89,6 +89,11 @@ class SonuClient:
         if self.client:
              self.reset_chat()
              
+        from smart_router import AIClassifierRouter
+        self.ai_router = AIClassifierRouter()
+        self.GEMINI_MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+        self._current_turn_budget = 4096
+
     def set_provider(self, name):
         prov_info = providers.get_provider(name)
         if not prov_info:
@@ -418,53 +423,60 @@ class SonuClient:
             if len(new_history) != len(old_history):
                 self.reset_chat(history=new_history)
 
-        resp = self._send_with_rotation(user_input)
+        original_model = self.model_name
+        try:
+            history_tail = self.chat.get_history()[-8:] if self.chat else []
+            selected_model, budget = self.ai_router.select_model(user_input, history_tail, self.client, self.GEMINI_MODEL_CHAIN)
+            self.model_name = selected_model
+            self._current_turn_budget = budget
 
-        for _ in range(max_steps):
-            function_calls = getattr(resp, "function_calls", None) or []
+            resp = self._send_with_rotation(user_input)
 
-            if not function_calls:
-                return self._extract_text(resp)
+            for _ in range(max_steps):
+                function_calls = getattr(resp, "function_calls", None) or []
 
-            interim = self._extract_text(resp)
-            if interim:
-                ui.show_agent_thought(interim)
+                if not function_calls:
+                    return self._extract_text(resp)
 
-            response_parts = []
-            for fc in function_calls:
-                name = fc.name
-                args = dict(fc.args) if fc.args else {}
+                interim = self._extract_text(resp)
+                if interim:
+                    ui.show_agent_thought(interim)
 
-                ui.show_tool_call(name, args)
+                response_parts = []
+                for fc in function_calls:
+                    name = fc.name
+                    args = dict(fc.args) if fc.args else {}
 
-                # Skill-Aktivierung wird im Client behandelt (aendert den System-Prompt),
-                # nicht ueber tools.dispatch. Keine Bestaetigung noetig.
-                if name == "activate_skill":
-                    ok, msg = self.set_skill(args.get("name"))
-                    ui.show_tool_result(name, msg, rejected=not ok)
-                    response_parts.append(
-                        types.Part.from_function_response(name=name, response={"result": msg})
-                    )
-                    continue
+                    ui.show_tool_call(name, args)
 
-                if not tools.is_safe(name):
-                    if not ui.confirm_action(name, args):
-                        result = "ABGELEHNT: Der Nutzer hat diese Aktion abgelehnt."
-                        ui.show_tool_result(name, result, rejected=True)
+                    if name == "activate_skill":
+                        ok, msg = self.set_skill(args.get("name"))
+                        ui.show_tool_result(name, msg, rejected=not ok)
                         response_parts.append(
-                            types.Part.from_function_response(name=name, response={"result": result})
+                            types.Part.from_function_response(name=name, response={"result": msg})
                         )
                         continue
 
-                result = tools.dispatch(name, args)
-                ui.show_tool_result(name, result)
-                response_parts.append(
-                    types.Part.from_function_response(name=name, response={"result": result})
-                )
+                    if not tools.is_safe(name):
+                        if not ui.confirm_action(name, args):
+                            result = "ABGELEHNT: Der Nutzer hat diese Aktion abgelehnt."
+                            ui.show_tool_result(name, result, rejected=True)
+                            response_parts.append(
+                                types.Part.from_function_response(name=name, response={"result": result})
+                            )
+                            continue
 
-            resp = self._send_with_rotation(response_parts)
+                    result = tools.dispatch(name, args)
+                    ui.show_tool_result(name, result)
+                    response_parts.append(
+                        types.Part.from_function_response(name=name, response={"result": result})
+                    )
 
-        return "(Abbruch: maximale Anzahl an Tool-Schritten erreicht.)"
+                resp = self._send_with_rotation(response_parts)
+
+            return "(Abbruch: maximale Anzahl an Tool-Schritten erreicht.)"
+        finally:
+            self.model_name = original_model
 
     @staticmethod
     def _extract_text(resp):

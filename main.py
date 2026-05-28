@@ -163,6 +163,14 @@ def main():
                 ui.show_info("Experten-Skill deaktiviert. Baseline-Prompt wiederhergestellt.")
                 continue
 
+            elif cmd == "/router status":
+                if hasattr(client, "ai_router") and hasattr(client.ai_router, "_last_classification") and client.ai_router._last_classification:
+                    c = client.ai_router._last_classification
+                    print(f"AI Classifier: aktiv | letzter Call: {c.get('model_choice', 'N/A')} ({c.get('reasoning', 'N/A')}) in {c.get('latency_ms', 0)}ms")
+                else:
+                    print("AI Classifier: aktiv | letzter Call: noch keiner")
+                continue
+
             elif cmd == "/memory":
                 import os as _os
                 mem = client.memory_mgr.load_memory(_os.getcwd())
