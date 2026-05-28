@@ -8,6 +8,9 @@ eine Bestaetigung durch den Aufrufer.
 
 import os
 import subprocess
+import urllib.request
+import urllib.error
+import json
 from google.genai import types
 
 # Maximale Ausgabelaenge, die wir ans Modell zurueckgeben (Token-Schutz).
@@ -325,6 +328,73 @@ def create_github_pull_request(title: str, body: str) -> str:
         return f"FEHLER bei Pull-Request-Erstellung: {e}"
 
 
+def firecrawl_web_search(query: str) -> str:
+    """Durchsucht das Web mit Firecrawl anhand eines Suchbegriffs."""
+    api_key = os.environ.get("FIRECRAWL_API_KEY")
+    if not api_key:
+        return "FEHLER: FIRECRAWL_API_KEY ist nicht in den Umgebungsvariablen gesetzt."
+
+    url = "https://api.firecrawl.dev/v1/search"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = json.dumps({"query": query}).encode("utf-8")
+
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            if result.get("success"):
+                data_list = result.get("data", [])
+                if not data_list:
+                    return f"Suche nach '{query}' lieferte keine Ergebnisse."
+
+                output = [f"Suchergebnisse fuer: '{query}'\n"]
+                for item in data_list:
+                    output.append(f"Titel: {item.get('title', 'Kein Titel')}")
+                    output.append(f"URL: {item.get('url', 'Keine URL')}")
+                    output.append(f"Beschreibung: {item.get('description', 'Keine Beschreibung')}\n")
+
+                return _truncate("\n".join(output))
+            else:
+                 return f"FEHLER bei der Firecrawl Suche: {result.get('error', 'Unbekannter Fehler')}"
+    except urllib.error.HTTPError as e:
+        return f"HTTP FEHLER {e.code}: {e.read().decode('utf-8', errors='replace')}"
+    except Exception as e:
+        return f"FEHLER bei der Ausfuehrung der Suche: {e}"
+
+
+def firecrawl_web_fetch(url: str) -> str:
+    """Extrahiert/Scraped den Text-Inhalt einer URL mit Firecrawl."""
+    api_key = os.environ.get("FIRECRAWL_API_KEY")
+    if not api_key:
+        return "FEHLER: FIRECRAWL_API_KEY ist nicht in den Umgebungsvariablen gesetzt."
+
+    api_url = "https://api.firecrawl.dev/v1/scrape"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    # Standard Scrape mit Textformat
+    data = json.dumps({"url": url, "formats": ["markdown"]}).encode("utf-8")
+
+    req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            if result.get("success"):
+                markdown = result.get("data", {}).get("markdown", "")
+                if not markdown:
+                    return f"Konnte keinen Markdown-Inhalt von '{url}' extrahieren."
+                return _truncate(markdown)
+            else:
+                 return f"FEHLER beim Scrapen: {result.get('error', 'Unbekannter Fehler')}"
+    except urllib.error.HTTPError as e:
+        return f"HTTP FEHLER {e.code}: {e.read().decode('utf-8', errors='replace')}"
+    except Exception as e:
+        return f"FEHLER bei der Ausfuehrung des Scrapes: {e}"
+
 # ---------------------------------------------------------------------------
 # Registry: name -> dict(func, declaration, safe)
 # 'safe' = read-only, laeuft ohne Bestaetigung.
@@ -506,6 +576,24 @@ REGISTRY = {
                 "task_description": _str("Detaillierte Anweisung und Ziel fuer den Sub-Agenten."),
                 "provider": _str("Optional: Spezifischer Provider (z.B. 'groq', 'xai', 'gemini') fuer den Subagenten.")
             }, ["task_description"]),
+        ),
+    },
+    "firecrawl_web_search": {
+        "func": firecrawl_web_search,
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="firecrawl_web_search",
+            description="Durchsucht das Web mit Firecrawl anhand eines Suchbegriffs und gibt relevante URLs mit Beschreibungen zurueck.",
+            parameters=_schema({"query": _str("Der Suchbegriff fuer die Web-Suche.")}, ["query"]),
+        ),
+    },
+    "firecrawl_web_fetch": {
+        "func": firecrawl_web_fetch,
+        "safe": True,
+        "declaration": types.FunctionDeclaration(
+            name="firecrawl_web_fetch",
+            description="Liest (scraped) den Text-Inhalt einer spezifischen URL mithilfe von Firecrawl als Markdown aus.",
+            parameters=_schema({"url": _str("Die URL, deren Inhalt gelesen werden soll.")}, ["url"]),
         ),
     },
 }
