@@ -93,6 +93,9 @@ class SonuClient:
         prov_info = providers.get_provider("gemini")
         self.model_name = model_name or prov_info["default_model"]
         
+        self._active_cache = None
+        self._active_cache_hash = None
+
         if self.client:
              self.reset_chat()
              
@@ -166,9 +169,45 @@ class SonuClient:
             f"{mem_context}\n"
         )
 
+        tool_list = [tools.get_tool_object(), self._skill_tool()]
+
+        # 4. Native Prompt Caching fuer grosse System-Prompts
+        if len(full_sys_prompt) > 100000:
+            import hashlib
+            prompt_hash = hashlib.sha256(full_sys_prompt.encode("utf-8")).hexdigest()
+
+            if self._active_cache_hash != prompt_hash or self._active_cache is None:
+                try:
+                    # Loesche alten Cache falls vorhanden
+                    if self._active_cache:
+                        try:
+                            self.client.caches.delete(name=self._active_cache)
+                        except Exception:
+                            pass
+
+                    cache = self.client.caches.create(
+                        model=self.model_name,
+                        config=types.CreateCachedContentConfig(
+                            system_instruction=full_sys_prompt,
+                            tools=tool_list,
+                            ttl="3600s"
+                        )
+                    )
+                    self._active_cache = cache.name
+                    self._active_cache_hash = prompt_hash
+                except Exception as e:
+                    # Fallback ohne Cache wenn Caching fehlschlaegt
+                    self._active_cache = None
+                    self._active_cache_hash = None
+
+            if self._active_cache:
+                return types.GenerateContentConfig(
+                    cached_content=self._active_cache
+                )
+
         return types.GenerateContentConfig(
             system_instruction=full_sys_prompt,
-            tools=[tools.get_tool_object(), self._skill_tool()],
+            tools=tool_list,
         )
 
     def _rebuild_preserving_history(self):
@@ -229,9 +268,6 @@ class SonuClient:
         if len(self.keys) <= 1:
             return False
 
-        # Damping factor: prevent microsecond "contact bounce" when rotating under rate limits
-        time.sleep(0.5)
-
         old_history = None
         try:
             old_history = self.chat.get_history() if self.chat else None
@@ -243,6 +279,11 @@ class SonuClient:
         self.api_key = new_key
 
         self.client = genai.Client(api_key=new_key)
+
+        # Reset cache on key rotation as caches are tied to specific API keys/projects
+        self._active_cache = None
+        self._active_cache_hash = None
+
         self._update_env_file(new_key)
         self.reset_chat(history=old_history)
         return True
@@ -304,6 +345,8 @@ class SonuClient:
                         if self._is_quota_error(err_str):
                             raise QuotaExhaustedException(self.model_name, len(self.keys))
                         raise
+            except QuotaExhaustedException:
+                raise
             except Exception as e:
                 err_str = str(e)
                 if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):
@@ -347,6 +390,8 @@ class SonuClient:
                         if self._is_quota_error(err_str):
                             raise QuotaExhaustedException(self.model_name, len(self.keys))
                         raise
+            except QuotaExhaustedException:
+                raise
             except Exception as e:
                 err_str = str(e)
                 if (self._is_server_error(err_str) or self._is_quota_error(err_str)) and attempt < len(backoff_schedule):

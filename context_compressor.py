@@ -47,8 +47,8 @@ def compress_openai_messages(messages: list, model_name: str, client_or_agent) -
     if len(history_msgs) < 3:
         return messages # Zu kurz für Kompression
         
-    # Wir wollen die ältesten 30% der history messages komprimieren
-    to_compress_count = int(len(history_msgs) * 0.3)
+    # Wir wollen die ältesten 50% der history messages komprimieren
+    to_compress_count = int(len(history_msgs) * 0.5)
     # Nicht mitten in einem tool_call / tool response abbrechen
     while to_compress_count < len(history_msgs) and history_msgs[to_compress_count].get("role") == "tool":
         to_compress_count += 1
@@ -74,8 +74,14 @@ def summarize_messages_openai(messages: list, agent) -> str:
     for m in messages:
         role = m.get("role", "unknown")
         content = m.get("content") or ""
+        if role == "tool":
+            content = f"[Tool Response] {content}"
         if role == "assistant" and m.get("tool_calls"):
             content += " [Tool Calls getätigt]"
+
+        if len(content) > 10000:
+            content = content[:10000] + "... [TRUNCATED]"
+
         text_to_summarize.append(f"{role.upper()}: {content}")
         
     full_text = "\n".join(text_to_summarize)
@@ -113,7 +119,7 @@ def compress_gemini_history(history: list, model_name: str, client) -> list:
     if len(history) < 3:
         return history
          
-    to_compress_count = int(len(history) * 0.3)
+    to_compress_count = int(len(history) * 0.5)
     if to_compress_count % 2 != 0:
         to_compress_count += 1 # Paarweise (user/model) lassen
         
@@ -155,8 +161,18 @@ def summarize_messages_gemini(history: list, client, model_name: str) -> str:
         role = content.role
         text_parts = []
         for p in content.parts:
-            if p.text: text_parts.append(p.text)
-            elif p.function_call: text_parts.append(f"[Tool Call: {p.function_call.name}]")
+            if p.text:
+                text = p.text
+                if len(text) > 10000:
+                    text = text[:10000] + "... [TRUNCATED]"
+                text_parts.append(text)
+            elif p.function_call:
+                text_parts.append(f"[Tool Call: {p.function_call.name}]")
+            elif p.function_response:
+                resp_str = str(p.function_response)
+                if len(resp_str) > 10000:
+                    resp_str = resp_str[:10000] + "... [TRUNCATED]"
+                text_parts.append(f"[Tool Response: {resp_str}]")
         text_to_summarize.append(f"{role.upper()}: {' '.join(text_parts)}")
         
     full_text = "\n".join(text_to_summarize)
