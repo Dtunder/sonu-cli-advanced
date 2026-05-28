@@ -8,7 +8,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from prompt_toolkit import prompt
-from sonu_client import SonuClient
+from sonu_client import SonuClient, QuotaExhaustedException
 from storage import StorageManager
 from terminal_ui import TerminalUI
 
@@ -310,6 +310,18 @@ def main():
 
             # Logge die Interaktion
             storage.log_interaction(cmd, response or "(keine Textantwort)")
+
+        except QuotaExhaustedException as e:
+            ui.show_error(f"Quota exhausted: {e}")
+            from groq_fallback import GroqFallback
+            try:
+                fallback = GroqFallback()
+                fallback_response = fallback.run_turn(cmd, client.get_history(), ui)
+                if fallback_response:
+                    ui.display_response(fallback_response)
+                storage.log_interaction(cmd, fallback_response or "(keine Textantwort vom Fallback)")
+            except Exception as fallback_e:
+                ui.show_error(f"Groq Fallback fehlgeschlagen: {fallback_e}")
 
         except KeyboardInterrupt:
             # Erlaubt dem Benutzer, mit Ctrl+C eine angefangene Eingabe abzubrechen

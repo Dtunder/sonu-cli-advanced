@@ -16,6 +16,13 @@ from storage import StorageManager
 from context_compressor import compress_gemini_history
 
 
+class QuotaExhaustedException(Exception):
+    def __init__(self, model_name: str, key_count: int):
+        super().__init__(f"Quota exhausted for model {model_name} after trying {key_count} keys.")
+        self.model_name = model_name
+        self.key_count = key_count
+
+
 SYSTEM_INSTRUCTION = """Du bist Sonu, ein autonomer Coding- und Recherche-Agent, der direkt im Terminal des Nutzers laeuft.
 
 Du hast echte Werkzeuge und handelst damit selbststaendig, statt nur zu reden:
@@ -187,6 +194,10 @@ class SonuClient:
         self._rebuild_preserving_history()
         return True, f"Skill '{name}' aktiviert."
 
+    def get_history(self):
+        """Gibt die aktuelle Chat-Historie als Liste von Content-Objekten zurueck."""
+        return self.chat.get_history() if self.chat else []
+
     def reset_chat(self, history=None):
         """Initialisiert oder resettet die Chat-Session, optional mit erhaltenem Verlauf."""
         try:
@@ -290,6 +301,8 @@ class SonuClient:
                         if self._is_quota_error(err_str) and len(self.keys) > 1:
                             if self.rotate_key():
                                 continue
+                        if self._is_quota_error(err_str):
+                            raise QuotaExhaustedException(self.model_name, len(self.keys))
                         raise
             except Exception as e:
                 err_str = str(e)
@@ -331,6 +344,8 @@ class SonuClient:
                         if self._is_quota_error(err_str) and len(self.keys) > 1:
                             if self.rotate_key():
                                 continue
+                        if self._is_quota_error(err_str):
+                            raise QuotaExhaustedException(self.model_name, len(self.keys))
                         raise
             except Exception as e:
                 err_str = str(e)
@@ -388,6 +403,8 @@ class SonuClient:
             for attempt in range(len(backoff_schedule) + 1):
                 try:
                     return self._run_agent_turn_internal(user_input, ui, max_steps)
+                except QuotaExhaustedException as e:
+                    raise e
                 except Exception as e:
                     err_str = str(e).lower()
                     is_retryable = (
